@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -233,25 +234,33 @@ func runWindowPicker() error {
 
 	sessionName, err := tmux.CurrentSessionName()
 	if err != nil {
+		slog.Error("window pick: getting current session name", "err", err)
 		return fmt.Errorf("getting current session name: %w", err)
 	}
 
-	rows, _, err := buildWindowRows(sessionName)
+	// Fetch the real tmux window names — these are the authoritative targets
+	// for SelectWindow. Using disk-derived rows (buildWindowRows) would produce
+	// padded display strings like "kalashnikov-core    ·  main" that don't
+	// match the actual tmux window names and break selection.
+	names, err := tmux.ListWindows(sessionName)
 	if err != nil {
-		return err
+		slog.Error("window pick: listing windows", "session", sessionName, "err", err)
+		return fmt.Errorf("listing windows in session %q: %w", sessionName, err)
 	}
+
+	slog.Debug("window pick: got window names", "session", sessionName, "count", len(names))
 
 	// When inside tmux and not already in a popup, re-invoke self inside a
 	// tmux display-popup so the picker floats over the current window.
 	if os.Getenv("GROVE_POPUP_ACTIVE") != "1" {
-		maxRowLen := 0
-		for _, r := range rows {
-			if len(r) > maxRowLen {
-				maxRowLen = len(r)
+		maxNameLen := 0
+		for _, n := range names {
+			if len(n) > maxNameLen {
+				maxNameLen = len(n)
 			}
 		}
-		width := maxRowLen + 6
-		height := len(rows) + 5
+		width := maxNameLen + 6
+		height := len(names) + 5
 		if height < 8 {
 			height = 8
 		}
@@ -274,15 +283,19 @@ func runWindowPicker() error {
 		return cmd.Run()
 	}
 
-	chosen, err := picker.NewFzf(cfg.Picker).Select(rows)
+	chosen, err := picker.NewFzf(cfg.Picker).Select(names)
 	if err != nil {
 		if errors.Is(err, picker.ErrCancelled) {
+			slog.Debug("window pick: cancelled", "session", sessionName)
 			return nil
 		}
+		slog.Error("window pick: picker error", "session", sessionName, "err", err)
 		return fmt.Errorf("picker: %w", err)
 	}
 
+	slog.Info("window pick: selecting window", "session", sessionName, "window", chosen)
 	if err := tmux.SelectWindow(sessionName, chosen); err != nil {
+		slog.Error("window pick: SelectWindow failed", "session", sessionName, "window", chosen, "err", err)
 		return fmt.Errorf("selecting window: %w", err)
 	}
 	return nil

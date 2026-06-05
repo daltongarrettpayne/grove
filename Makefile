@@ -1,14 +1,20 @@
 # grove Makefile
 # All targets are PHONY (no files named build/test/etc. in the repo).
-.PHONY: build test test-integration lint clean fixtures docker-build docker-run dev dev-fast
+.PHONY: build install test test-integration lint clean fixtures docker-build docker-run dev dev-fast
 
-BINARY  := grove
-CMD     := ./cmd/grove
-BIN_DIR := bin
+BINARY   := grove
+CMD      := ./cmd/grove
+BIN_DIR  := bin
+INSTALL  := $(HOME)/.local/bin
 
 ## build: compile the grove binary to bin/grove
 build:
 	go build -o $(BIN_DIR)/$(BINARY) $(CMD)
+
+## install: build and install grove to ~/.local/bin/grove
+install: build
+	install -m 755 $(BIN_DIR)/$(BINARY) $(INSTALL)/$(BINARY)
+	xattr -c $(INSTALL)/$(BINARY)
 
 ## test: run all unit tests with the race detector
 test:
