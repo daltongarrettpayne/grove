@@ -149,57 +149,54 @@ func runProjectInit(name string, code, noGit bool, cloneURL string) error {
 	}
 
 	vaultDir := filepath.Join(cfg.HomeRoot, "01-Projects", name)
+	codeDir := filepath.Join(cfg.CodeRoot, name)
 
-	// Step 2: fail if vault dir already exists.
-	if _, err := os.Stat(vaultDir); err == nil {
-		return fmt.Errorf("vault directory already exists: %s", vaultDir)
+	_, vaultErr := os.Stat(vaultDir)
+	vaultExists := vaultErr == nil
+	_, codeErr := os.Stat(codeDir)
+	codeDirExists := codeErr == nil
+
+	// If vault already exists and --code is not set, nothing to do.
+	if vaultExists && !code {
+		return fmt.Errorf("project %q already exists at %s\nTo add a code directory, run: grove project init %s --code", name, vaultDir, name)
+	}
+	// If both already exist, there is nothing to add.
+	if vaultExists && codeDirExists {
+		return fmt.Errorf("project %q is already fully initialized (vault and code directory both exist)", name)
 	}
 
-	// Step 3: create the vault directory.
-	slog.Info("creating vault directory", "path", vaultDir)
-	if err := os.MkdirAll(vaultDir, 0755); err != nil {
-		return fmt.Errorf("creating vault directory %s: %w", vaultDir, err)
-	}
-
-	// Step 4: write context.md.
-	today := time.Now().Format("2006-01-02")
-	var sourceSet []string
-	if code {
-		codeDir := filepath.Join(cfg.CodeRoot, name)
-		sourceSet = []string{codeDir}
-	}
-	if err := vault.WriteContextMD(vaultDir, name, today, code, sourceSet); err != nil {
-		return fmt.Errorf("writing context.md: %w", err)
-	}
-	fmt.Printf("created  %s\n", filepath.Join(vaultDir, "context.md"))
-	fmt.Printf("created  %s\n", vaultDir)
-
-	// Step 5: code directory (optional).
-	if code {
-		codeDir := filepath.Join(cfg.CodeRoot, name)
-
-		// Fail if code dir already exists.
-		if _, err := os.Stat(codeDir); err == nil {
-			return fmt.Errorf("code directory already exists: %s", codeDir)
+	// Step 2: create the vault directory and context.md (only if it doesn't exist yet).
+	if !vaultExists {
+		if err := os.MkdirAll(vaultDir, 0755); err != nil {
+			return fmt.Errorf("creating vault directory %s: %w", vaultDir, err)
 		}
+		today := time.Now().Format("2006-01-02")
+		var sourceSet []string
+		if code {
+			sourceSet = []string{codeDir}
+		}
+		if err := vault.WriteContextMD(vaultDir, name, today, code, sourceSet); err != nil {
+			return fmt.Errorf("writing context.md: %w", err)
+		}
+		fmt.Printf("created  %s\n", filepath.Join(vaultDir, "context.md"))
+		fmt.Printf("created  %s\n", vaultDir)
+	}
 
-		slog.Info("creating code directory", "path", codeDir)
+	// Step 3: code directory (optional).
+	if code {
 		if err := os.MkdirAll(codeDir, 0755); err != nil {
 			return fmt.Errorf("creating code directory %s: %w", codeDir, err)
 		}
 
 		if cloneURL != "" {
-			// Clone — stream output so the user sees progress.
-			slog.Info("cloning repository", "url", cloneURL, "dest", codeDir)
 			cloneCmd := exec.Command("git", "clone", cloneURL, codeDir)
 			cloneCmd.Stdout = os.Stdout
 			cloneCmd.Stderr = os.Stderr
 			if err := cloneCmd.Run(); err != nil {
 				return fmt.Errorf("cloning %s into %s: %w", cloneURL, codeDir, err)
 			}
-			fmt.Printf("cloned   %s  →  %s\n", cloneURL, codeDir)
+			fmt.Printf("cloned   %s -> %s\n", cloneURL, codeDir)
 		} else if !noGit {
-			slog.Info("initialising git repository", "path", codeDir)
 			initCmd := exec.Command("git", "init", "-b", "main", codeDir)
 			if err := initCmd.Run(); err != nil {
 				return fmt.Errorf("git init %s: %w", codeDir, err)
@@ -209,13 +206,16 @@ func runProjectInit(name string, code, noGit bool, cloneURL string) error {
 			fmt.Printf("created  %s\n", codeDir)
 		}
 
-		// Symlink vault/code → codeDir.
+		// Symlink vault/code -> codeDir.
 		symlink := filepath.Join(vaultDir, "code")
-		slog.Info("creating symlink", "link", symlink, "target", codeDir)
-		if err := os.Symlink(codeDir, symlink); err != nil {
-			return fmt.Errorf("creating symlink %s → %s: %w", symlink, codeDir, err)
+		if _, err := os.Lstat(symlink); err == nil {
+			// Symlink already exists (vault existed with code symlink somehow); skip.
+		} else {
+			if err := os.Symlink(codeDir, symlink); err != nil {
+				return fmt.Errorf("creating symlink %s -> %s: %w", symlink, codeDir, err)
+			}
+			fmt.Printf("symlink  %s -> %s\n", symlink, codeDir)
 		}
-		fmt.Printf("symlink  %s  →  %s\n", symlink, codeDir)
 	}
 
 	return nil

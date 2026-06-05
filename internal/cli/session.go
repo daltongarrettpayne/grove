@@ -314,21 +314,32 @@ func runSessionList(asJSON bool) error {
 		return nil
 	}
 
-	// Human-readable aligned table.
+	// Detect the active tmux session so we can mark it with *.
+	var curSession string
+	if os.Getenv("TMUX") != "" {
+		curSession, _ = tmux.CurrentSessionName()
+	}
+
+	// Human-readable aligned table. Leading 2-char marker column ("* " or "  ").
 	colName := maxNameLen
 	colTier := len("project")
 	colLanes := len("lanes")
 	colSess := len("session")
 
-	fmt.Printf("%-*s  %-*s  %-*s  %-*s\n", colName, "name", colTier, "tier", colLanes, "lanes", colSess, "session")
-	fmt.Printf("%-*s  %-*s  %-*s  %-*s\n",
+	fmt.Printf("  %-*s  %-*s  %-*s  %-*s\n", colName, "name", colTier, "tier", colLanes, "lanes", colSess, "session")
+	fmt.Printf("  %-*s  %-*s  %-*s  %-*s\n",
 		colName, dashes(colName),
 		colTier, dashes(colTier),
 		colLanes, dashes(colLanes),
 		colSess, dashes(colSess),
 	)
 	for _, e := range entries {
-		fmt.Printf("%-*s  %-*s  %-*d  %-*s\n",
+		marker := "  "
+		if curSession != "" && e.Name == curSession {
+			marker = "* "
+		}
+		fmt.Printf("%s%-*s  %-*s  %-*d  %-*s\n",
+			marker,
 			colName, e.Name,
 			colTier, e.Tier,
 			colLanes, e.LaneCount,
