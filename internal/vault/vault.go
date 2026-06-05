@@ -30,14 +30,14 @@ func WriteContextMD(dir, name, created string, code bool, sourceSet []string) er
 	var sb strings.Builder
 
 	sb.WriteString("---\n")
-	sb.WriteString(fmt.Sprintf("name: %s\n", name))
-	sb.WriteString(fmt.Sprintf("created: %s\n", created))
-	sb.WriteString(fmt.Sprintf("code: %v\n", code))
+	fmt.Fprintf(&sb, "name: %s\n", name)
+	fmt.Fprintf(&sb, "created: %s\n", created)
+	fmt.Fprintf(&sb, "code: %v\n", code)
 
 	if code || len(sourceSet) > 0 {
 		sb.WriteString("source_set:\n")
 		for _, p := range sourceSet {
-			sb.WriteString(fmt.Sprintf("  - %s\n", p))
+			fmt.Fprintf(&sb, "  - %s\n", p)
 		}
 	}
 

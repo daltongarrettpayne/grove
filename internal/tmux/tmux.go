@@ -131,6 +131,11 @@ func CurrentWindowName() (string, error) {
 	return DisplayMessage("#{window_name}")
 }
 
+// CurrentPaneDir returns the current working directory of the active pane.
+func CurrentPaneDir() (string, error) {
+	return DisplayMessage("#{pane_current_path}")
+}
+
 // SelectWindow switches the active window in session to the one matching target.
 // target may be a window name or index: e.g. "home" or "mysession:2".
 func SelectWindow(session, target string) error {
