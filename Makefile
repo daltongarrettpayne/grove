@@ -1,6 +1,6 @@
 # grove Makefile
 # All targets are PHONY (no files named build/test/etc. in the repo).
-.PHONY: build test test-integration lint clean fixtures docker-build docker-run
+.PHONY: build test test-integration lint clean fixtures docker-build docker-run dev dev-fast
 
 BINARY  := grove
 CMD     := ./cmd/grove
@@ -34,10 +34,18 @@ fixtures:
 docker-build:
 	docker build -t grove-dev .
 
-## docker-run: start an interactive shell inside the clean-room
-##   Inside: `grove session list`, `grove window`, etc. all work against fixtures.
-##   Start tmux with: tmux new-session -s dev
+## docker-run: start an interactive shell inside the clean-room (bash, no tmux)
 docker-run:
+	docker run -it --rm --entrypoint bash grove-dev
+
+## dev: build image and drop into a live grove tmux session with test fixtures
+##   Lands in coding-project-big with fixture repos as windows.
+##   grove, tmux, git, fzf all on PATH. Exit tmux to leave the container.
+dev: docker-build
+	docker run -it --rm grove-dev
+
+## dev-fast: start the dev container without rebuilding the image
+dev-fast:
 	docker run -it --rm grove-dev
 
 ## help: list available targets

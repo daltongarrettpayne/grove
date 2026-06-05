@@ -63,6 +63,54 @@ func BranchExists(dir, branch string) (bool, error) {
 	return strings.TrimSpace(out) != "", nil
 }
 
+// WorktreeEntry is one entry from `git worktree list --porcelain`.
+type WorktreeEntry struct {
+	Dir    string // absolute path to the working tree
+	Branch string // refs/heads/<name> stripped to just <name>; empty if detached
+	IsMain bool   // true for the primary clone (first entry from git)
+}
+
+// ListWorktrees returns all worktrees for the repo containing repoDir.
+func ListWorktrees(repoDir string) ([]WorktreeEntry, error) {
+	out, err := run(repoDir, "worktree", "list", "--porcelain")
+	if err != nil {
+		return nil, fmt.Errorf("listing worktrees: %w", err)
+	}
+
+	var entries []WorktreeEntry
+	var current WorktreeEntry
+	first := true
+
+	for _, line := range strings.Split(out, "\n") {
+		switch {
+		case strings.HasPrefix(line, "worktree "):
+			// Start of a new entry — save the previous one (if any).
+			if current.Dir != "" {
+				entries = append(entries, current)
+			}
+			current = WorktreeEntry{Dir: strings.TrimPrefix(line, "worktree ")}
+			if first {
+				current.IsMain = true
+				first = false
+			}
+		case strings.HasPrefix(line, "branch "):
+			ref := strings.TrimPrefix(line, "branch ")
+			current.Branch = strings.TrimPrefix(ref, "refs/heads/")
+		case line == "detached":
+			current.Branch = ""
+		case line == "":
+			// Blank line marks end of an entry block — nothing to do here;
+			// we flush on the next "worktree " line or at the end.
+		}
+	}
+	// Flush the last entry.
+	if current.Dir != "" {
+		entries = append(entries, current)
+	}
+
+	return entries, nil
+}
+
 // RepoName returns the repository name for a working tree.
 //
 // Resolution order:

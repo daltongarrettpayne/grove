@@ -30,7 +30,7 @@ func Load() (*Config, error) {
 		CodeRoot: filepath.Join(home, "code"),
 		HomeRoot: home,
 		Picker:   "fzf",
-		LogLevel: "info",
+		LogLevel: "warn",
 	}
 
 	applyEnv(cfg)

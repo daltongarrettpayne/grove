@@ -18,28 +18,113 @@ import (
 var sessionCmd = &cobra.Command{
 	Use:   "session",
 	Short: "Manage grove sessions",
+	Long: `Commands for building, listing, and removing grove context sessions.
+
+A grove session is a tmux session derived from a context directory in your vault
+tree. Every session has a pinned "home" window (lane 0) plus one window per git
+working tree found in the matching code directory.`,
 }
 
 var sessionOpenCmd = &cobra.Command{
 	Use:   "open <context>",
 	Short: "Open or attach to a context session (idempotent)",
-	Args:  cobra.ExactArgs(1),
+	Long: `Build a tmux session for <context> and attach to it, or attach if it already exists.
+
+Preconditions:
+  - GROVE_HOME_ROOT must be set (or default ~/  must exist).
+  - <context> must be a directory under $GROVE_HOME_ROOT/01-Projects/ or
+    $GROVE_HOME_ROOT/02-Areas/.
+  - tmux must be installed and reachable on PATH.
+
+What it does:
+  1. Locates <context> in the vault tiers (01-Projects, then 02-Areas).
+  2. If the session already exists, attaches immediately (idempotent).
+  3. Otherwise: creates a session rooted at <context>'s vault directory, names
+     window 0 "home", scans $GROVE_CODE_ROOT/<context> for git working trees,
+     and creates one window per working tree using the "(repo) · (branch)" name
+     format. Focus returns to "home" before attach.
+  4. Attaches to the session (or switches if already inside tmux).
+
+Exit behaviour: exits 0 on successful attach; non-zero if the context is not
+found, the home directory is missing, or tmux fails.`,
+	Example: `  # Build and attach to the "kalashnikov" session:
+  grove session open kalashnikov
+
+  # Idempotent — safe to run again if the session already exists:
+  grove session open kalashnikov
+
+  # Use a custom vault root for a one-off:
+  GROVE_HOME_ROOT=~/work-vault grove session open my-project`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runSessionOpen(args[0])
 	},
 }
 
+var sessionListJSON bool
+
 var sessionListCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List available contexts as JSON",
+	Short: "List all contexts in the vault",
+	Long: `Scan the vault tiers and print all available contexts.
+
+Preconditions:
+  - GROVE_HOME_ROOT must contain 01-Projects/ and/or 02-Areas/ subdirectories.
+
+Human output (default): an aligned table with columns:
+  name     — context directory name
+  tier     — "project" (01-Projects) or "area" (02-Areas)
+  lanes    — number of git working trees in the code directory
+  session  — whether a live tmux session exists for this context
+
+JSON output (--json): a JSON array where each element has:
+  name, tier, lane_count, session, home_dir, lanes[]
+
+Contexts from both 01-Projects/ and 02-Areas/ are included.`,
+	Example: `  # Human-readable table:
+  grove session list
+
+  # Machine-readable JSON:
+  grove session list --json
+
+  # Find live sessions with jq:
+  grove session list --json | jq '[.[] | select(.session == true)]'`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return runSessionList()
+		return runSessionList(sessionListJSON)
+	},
+}
+
+var sessionDeleteCmd = &cobra.Command{
+	Use:   "delete <name>",
+	Short: "Kill a running tmux session by name",
+	Args:  cobra.ExactArgs(1),
+	Long: `Kill a running tmux session by name.
+
+Preconditions:
+  - The named session must currently exist in tmux.
+
+What it does:
+  1. Verifies the session exists (fails loudly if not).
+  2. Runs tmux kill-session to terminate it.
+  3. Prints confirmation.
+
+Exits 0 on success. Exits non-zero if the session is not found or kill fails.`,
+	Example: `
+  # Delete a session named "grove":
+  grove session delete grove
+
+  # Delete the session for a project context:
+  grove session delete Kalashnikov.AI`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runSessionDelete(args[0])
 	},
 }
 
 func init() {
+	sessionListCmd.Flags().BoolVar(&sessionListJSON, "json", false, "emit output as a JSON array")
 	sessionCmd.AddCommand(sessionOpenCmd)
 	sessionCmd.AddCommand(sessionListCmd)
+	sessionCmd.AddCommand(sessionDeleteCmd)
 	rootCmd.AddCommand(sessionCmd)
 }
 
@@ -143,28 +228,43 @@ func runSessionOpen(name string) error {
 	return tmux.AttachOrSwitch(name)
 }
 
-func runSessionList() error {
-	// Vault tiers whose subdirectories are workspace contexts, per the design doc.
-	tiers := []string{"01-Projects", "02-Areas"}
+type sessionListEntry struct {
+	Name      string       `json:"name"`
+	Tier      string       `json:"tier"`
+	LaneCount int          `json:"lane_count"`
+	Session   bool         `json:"session"`
+	HomeDir   string       `json:"home_dir"`
+	Lanes     []model.Lane `json:"lanes"`
+}
 
-	var contexts []model.Context
+func runSessionList(asJSON bool) error {
+	tiers := []struct {
+		dir   string
+		label string
+	}{
+		{"01-Projects", "project"},
+		{"02-Areas", "area"},
+	}
+
+	var entries []sessionListEntry
+	maxNameLen := len("name")
+
 	for _, tier := range tiers {
-		tierDir := filepath.Join(cfg.HomeRoot, tier)
-		entries, err := os.ReadDir(tierDir)
+		tierDir := filepath.Join(cfg.HomeRoot, tier.dir)
+		dirEntries, err := os.ReadDir(tierDir)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
 			return fmt.Errorf("reading vault tier %s: %w", tierDir, err)
 		}
-		for _, e := range entries {
+		for _, e := range dirEntries {
 			if !e.IsDir() || isHiddenName(e.Name()) {
 				continue
 			}
 			name := e.Name()
 			homeDir := filepath.Join(tierDir, name)
 
-			// lanes is initialised as empty (not nil) so JSON encodes [] not null.
 			lanes := make([]model.Lane, 0)
 			codeContainer := filepath.Join(cfg.CodeRoot, name)
 			if _, statErr := os.Stat(codeContainer); statErr == nil {
@@ -172,27 +272,99 @@ func runSessionList() error {
 				if scanErr != nil {
 					return fmt.Errorf("scanning %s: %w", codeContainer, scanErr)
 				}
-				lanes = scanned
+				lanes = append(lanes, scanned...)
 			}
 
-			contexts = append(contexts, model.Context{
+			live, sessErr := tmux.HasSession(name)
+			if sessErr != nil {
+				slog.Debug("tmux.HasSession error", "name", name, "err", sessErr)
+				live = false
+			}
+
+			entries = append(entries, sessionListEntry{
 				Name:      name,
+				Tier:      tier.label,
+				LaneCount: len(lanes),
+				Session:   live,
 				HomeDir:   homeDir,
-				SourceSet: model.SourceSet{codeContainer},
 				Lanes:     lanes,
 			})
+			if len(name) > maxNameLen {
+				maxNameLen = len(name)
+			}
 		}
 	}
 
-	out, err := json.MarshalIndent(contexts, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshalling contexts: %w", err)
+	if asJSON {
+		// Rebuild as []model.Context for backwards-compatible JSON shape.
+		contexts := make([]model.Context, len(entries))
+		for i, e := range entries {
+			contexts[i] = model.Context{
+				Name:      e.Name,
+				HomeDir:   e.HomeDir,
+				SourceSet: model.SourceSet{filepath.Join(cfg.CodeRoot, e.Name)},
+				Lanes:     e.Lanes,
+			}
+		}
+		out, err := json.MarshalIndent(entries, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshalling contexts: %w", err)
+		}
+		fmt.Println(string(out))
+		return nil
 	}
-	fmt.Println(string(out))
+
+	// Detect the active tmux session so we can mark it with *.
+	var curSession string
+	if os.Getenv("TMUX") != "" {
+		curSession, _ = tmux.CurrentSessionName()
+	}
+
+	// Human-readable aligned table. Leading 2-char marker column ("* " or "  ").
+	colName := maxNameLen
+	colTier := len("project")
+	colLanes := len("lanes")
+	colSess := len("session")
+
+	fmt.Printf("  %-*s  %-*s  %-*s  %-*s\n", colName, "name", colTier, "tier", colLanes, "lanes", colSess, "session")
+	fmt.Printf("  %-*s  %-*s  %-*s  %-*s\n",
+		colName, dashes(colName),
+		colTier, dashes(colTier),
+		colLanes, dashes(colLanes),
+		colSess, dashes(colSess),
+	)
+	for _, e := range entries {
+		marker := "  "
+		if curSession != "" && e.Name == curSession {
+			marker = "* "
+		}
+		fmt.Printf("%s%-*s  %-*s  %-*d  %-*s\n",
+			marker,
+			colName, e.Name,
+			colTier, e.Tier,
+			colLanes, e.LaneCount,
+			colSess, boolStr(e.Session),
+		)
+	}
 	return nil
 }
 
 // isHiddenName reports whether a directory name starts with a dot.
 func isHiddenName(name string) bool {
 	return len(name) > 0 && name[0] == '.'
+}
+
+func runSessionDelete(name string) error {
+	exists, err := tmux.HasSession(name)
+	if err != nil {
+		return fmt.Errorf("checking session %q: %w", name, err)
+	}
+	if !exists {
+		return fmt.Errorf("session %s not found", name)
+	}
+	if err := tmux.KillSession(name); err != nil {
+		return fmt.Errorf("killing session %q: %w", name, err)
+	}
+	fmt.Printf("deleted session %s\n", name)
+	return nil
 }

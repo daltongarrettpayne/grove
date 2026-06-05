@@ -36,6 +36,19 @@ func IsKebabCase(s string) bool {
 	return kebabRe.MatchString(s)
 }
 
+// ValidateRepoName returns an error if name is not a valid grove project/repo
+// name. Valid names are kebab-case: lowercase letters, digits, and hyphens,
+// starting with a letter or digit. No underscores, no uppercase.
+func ValidateRepoName(name string) error {
+	if !IsKebabCase(name) {
+		return fmt.Errorf(
+			"name %q must be kebab-case (lowercase letters, digits, hyphens only; no underscores or uppercase)",
+			name,
+		)
+	}
+	return nil
+}
+
 // ValidateBranchName returns an error if branch does not conform to grove's
 // branch naming convention.
 //

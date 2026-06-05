@@ -30,8 +30,8 @@ func TestLoad_defaults(t *testing.T) {
 	if cfg.Picker != "fzf" {
 		t.Errorf("Picker = %q, want %q", cfg.Picker, "fzf")
 	}
-	if cfg.LogLevel != "info" {
-		t.Errorf("LogLevel = %q, want %q", cfg.LogLevel, "info")
+	if cfg.LogLevel != "warn" {
+		t.Errorf("LogLevel = %q, want %q", cfg.LogLevel, "warn")
 	}
 }
 

@@ -131,12 +131,26 @@ func CurrentWindowName() (string, error) {
 	return DisplayMessage("#{window_name}")
 }
 
+// CurrentPaneDir returns the current working directory of the active pane.
+func CurrentPaneDir() (string, error) {
+	return DisplayMessage("#{pane_current_path}")
+}
+
 // SelectWindow switches the active window in session to the one matching target.
 // target may be a window name or index: e.g. "home" or "mysession:2".
 func SelectWindow(session, target string) error {
 	_, err := run("select-window", "-t", session+":"+target)
 	if err != nil {
 		return fmt.Errorf("selecting window %q in %q: %w", target, session, err)
+	}
+	return nil
+}
+
+// KillSession kills the tmux session with the given name.
+func KillSession(name string) error {
+	_, err := run("kill-session", "-t", name)
+	if err != nil {
+		return fmt.Errorf("killing session %q: %w", name, err)
 	}
 	return nil
 }
@@ -151,4 +165,19 @@ func ListWindows(session string) ([]string, error) {
 		return nil, nil
 	}
 	return strings.Split(out, "\n"), nil
+}
+
+// KillWindow kills a window by name inside session.
+// Returns nil if the window was not found (idempotent).
+func KillWindow(session, windowName string) error {
+	target := session + ":" + windowName
+	err := exec.Command("tmux", "kill-window", "-t", target).Run()
+	if err == nil {
+		return nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return nil
+	}
+	return fmt.Errorf("tmux kill-window %q: %w", target, err)
 }

@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -17,12 +19,39 @@ import (
 var windowCmd = &cobra.Command{
 	Use:   "window",
 	Short: "Manage grove windows",
+	Long: `Commands for listing and navigating the windows in a grove context session.
+
+Windows in grove follow the display grammar: "home" (lane 0, always first), then
+one row per code lane in the format "<repo>  ·  <branch>", with repo names
+left-padded so the separator columns align.`,
 }
 
 var windowListCmd = &cobra.Command{
 	Use:   "list [<context>]",
 	Short: "List windows for a context (defaults to current tmux session)",
-	Args:  cobra.MaximumNArgs(1),
+	Long: `Print the ordered list of windows for a context, one per line.
+
+Preconditions:
+  - <context> must exist in $GROVE_HOME_ROOT/01-Projects/ or 02-Areas/.
+  - If no <context> is given, must be run inside a tmux session (TMUX must be set).
+
+Output format:
+  - "home" is always first.
+  - Code lanes follow as "<repo>  ·  <branch>" with aligned separators.
+  - When listing the current session, the active window is prefixed with "* ";
+    all others are prefixed with "  ".
+
+When <context> is given explicitly, no "current window" marking is applied
+unless the named context matches the session you are currently attached to.`,
+	Example: `  # List windows for the current session (must be inside tmux):
+  grove window list
+
+  # List windows for a named context (works outside tmux):
+  grove window list kalashnikov
+
+  # Pipe to fzf manually:
+  grove window list | fzf`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if len(args) == 1 {
 			return runWindowList(args[0])
@@ -42,14 +71,70 @@ var windowListCmd = &cobra.Command{
 var windowPickCmd = &cobra.Command{
 	Use:   "pick",
 	Short: "Open the fzf window picker for the current session",
+	Long: `Open the interactive picker over all windows in the current grove session,
+then switch to the selected window.
+
+Preconditions:
+  - Must be run inside a tmux session (TMUX must be set).
+  - The picker binary (default: fzf) must be on PATH. Override with GROVE_PICKER.
+  - The current session name must match a context in the vault tiers.
+
+What it does:
+  1. Derives the context name from the current tmux session.
+  2. Builds the ordered window list: "home" first, then code lanes.
+  3. Passes the list to the picker binary via stdin.
+  4. On selection, switches to the chosen tmux window by name.
+  5. On cancel (Esc / Ctrl-C), exits silently with code 0.
+
+This command is designed to be bound to a tmux key in your tmux.conf:
+  bind-key w run-shell "grove window pick"`,
+	Example: `  # Open the picker (inside tmux):
+  grove window pick
+
+  # Use a different picker:
+  GROVE_PICKER=sk grove window pick
+
+  # Typical tmux.conf binding:
+  bind-key w run-shell "grove window pick"`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runWindowPicker()
+	},
+}
+
+var windowDeleteCmd = &cobra.Command{
+	Use:   "delete [<name>]",
+	Short: "Kill a window in the current tmux session",
+	Args:  cobra.MaximumNArgs(1),
+	Long: `Kill a window in the current tmux session.
+
+Preconditions:
+  - Must be run inside a tmux session ($TMUX must be set).
+
+What it does:
+  - With no argument: kills the current window.
+  - With a name argument: kills the named window in the current session.
+    The "home" window cannot be deleted.
+
+Exits 0 on success. Exits non-zero if not inside tmux, if the window is
+"home", or if tmux fails to kill the window.`,
+	Example: `
+  # Delete the current window:
+  grove window delete
+
+  # Delete a window by name:
+  grove window delete "grove  ·  feat/user-auth"`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			return runWindowDeleteCurrent()
+		}
+		return runWindowDelete(args[0])
 	},
 }
 
 func init() {
 	windowCmd.AddCommand(windowListCmd)
 	windowCmd.AddCommand(windowPickCmd)
+	windowCmd.AddCommand(windowDeleteCmd)
 	rootCmd.AddCommand(windowCmd)
 }
 
@@ -166,5 +251,55 @@ func runWindowPicker() error {
 	if err := tmux.SelectWindow(sessionName, chosen); err != nil {
 		return fmt.Errorf("selecting window: %w", err)
 	}
+	return nil
+}
+
+func runWindowDeleteCurrent() error {
+	if os.Getenv("TMUX") == "" {
+		return fmt.Errorf("grove window delete must be run inside a tmux session")
+	}
+	// kill-window with no -t kills the current window.
+	cmd := exec.Command("tmux", "kill-window")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("killing current window: %w", err)
+	}
+	fmt.Println("deleted current window")
+	return nil
+}
+
+func runWindowDelete(name string) error {
+	if os.Getenv("TMUX") == "" {
+		return fmt.Errorf("grove window delete must be run inside a tmux session")
+	}
+	if name == "home" {
+		return fmt.Errorf("cannot delete the home window")
+	}
+	sessionName, err := tmux.CurrentSessionName()
+	if err != nil {
+		return fmt.Errorf("getting current session name: %w", err)
+	}
+
+	windows, err := tmux.ListWindows(sessionName)
+	if err != nil {
+		return fmt.Errorf("listing windows in session %q: %w", sessionName, err)
+	}
+	found := false
+	for _, w := range windows {
+		if w == name {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("window %q not found in session %q\nAvailable windows:\n  %s",
+			name, sessionName, strings.Join(windows, "\n  "))
+	}
+
+	if err := tmux.KillWindow(sessionName, name); err != nil {
+		return fmt.Errorf("killing window %q: %w", name, err)
+	}
+	fmt.Printf("deleted window %q\n", name)
 	return nil
 }
