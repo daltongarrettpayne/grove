@@ -239,7 +239,9 @@ func runWorktreeList(repo string, asJSON bool) error {
 		if e.IsMain {
 			marker = "(main)"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\n", label, e.Dir, marker)
+		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\n", label, e.Dir, marker); err != nil {
+			return err
+		}
 	}
 	return w.Flush()
 }
