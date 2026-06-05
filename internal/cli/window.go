@@ -111,8 +111,31 @@ func runWindowList(ctxName string) error {
 	if err != nil {
 		return err
 	}
+
+	// Mark the current window only when listing the current tmux session.
+	var curRepo, curBranch string
+	var curIsHome bool
+	marking := false
+	if os.Getenv("TMUX") != "" {
+		if sessionName, sErr := tmux.CurrentSessionName(); sErr == nil && sessionName == ctxName {
+			if windowName, wErr := tmux.CurrentWindowName(); wErr == nil {
+				curRepo, curBranch, curIsHome = model.ParseWindowName(windowName)
+				marking = true
+			}
+		}
+	}
+
 	for _, r := range rows {
-		fmt.Println(r)
+		if !marking {
+			fmt.Println(r)
+			continue
+		}
+		rRepo, rBranch, rIsHome := model.ParseWindowName(r)
+		if rIsHome == curIsHome && rRepo == curRepo && rBranch == curBranch {
+			fmt.Println("* " + r)
+		} else {
+			fmt.Println("  " + r)
+		}
 	}
 	return nil
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/daltongarrettpayne/grove/internal/git"
+	"github.com/daltongarrettpayne/grove/internal/model"
 	"github.com/daltongarrettpayne/grove/internal/tmux"
 )
 
@@ -54,7 +55,12 @@ func slugifyBranch(branch string) string {
 }
 
 func runWorktreeNew(branch, repo string) error {
-	// 1. Resolve the main repo.
+	// 1. Validate branch name before touching the filesystem.
+	if err := model.ValidateBranchName(branch); err != nil {
+		return err
+	}
+
+	// 2. Resolve the main repo.
 	var mainRepo string
 	if repo != "" {
 		mainRepo = repo
@@ -89,14 +95,14 @@ func runWorktreeNew(branch, repo string) error {
 
 	slog.Debug("resolved main repo", "path", mainRepo)
 
-	// 2. Compute the worktree destination directory.
+	// 3. Compute the worktree destination directory.
 	repoName := filepath.Base(mainRepo)
 	slug := slugifyBranch(branch)
 	dest := filepath.Join(filepath.Dir(mainRepo), repoName+"-"+slug)
 
 	slog.Debug("worktree destination", "dest", dest)
 
-	// 3. Create the worktree.
+	// 4. Create the worktree.
 	if _, err := os.Stat(dest); err == nil {
 		return fmt.Errorf("destination already exists: %s", dest)
 	}
@@ -108,7 +114,7 @@ func runWorktreeNew(branch, repo string) error {
 
 	slog.Info("created worktree", "branch", branch, "dest", dest)
 
-	// 4. Register as a tmux window (only if running inside tmux).
+	// 5. Register as a tmux window (only if running inside tmux).
 	if os.Getenv("TMUX") != "" {
 		sessionName, err := tmux.CurrentSessionName()
 		if err != nil {

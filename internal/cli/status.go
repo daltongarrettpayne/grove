@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/daltongarrettpayne/grove/internal/model"
 	"github.com/daltongarrettpayne/grove/internal/tmux"
 )
 
@@ -37,6 +38,15 @@ func runStatusSegment() error {
 		return fmt.Errorf("getting current window name: %w", err)
 	}
 
-	fmt.Printf("%s › %s\n", session, window)
+	repo, branch, isHome := model.ParseWindowName(window)
+	switch {
+	case isHome:
+		fmt.Printf("%s › home\n", session)
+	case branch != "":
+		fmt.Printf("%s › %s · %s\n", session, repo, branch)
+	default:
+		// Unrecognised window name (manually created): fall back to raw name.
+		fmt.Printf("%s › %s\n", session, window)
+	}
 	return nil
 }

@@ -89,3 +89,25 @@ func (c *Context) MaxRepoLen() int {
 	}
 	return n
 }
+
+// windowSep is the fixed separator string used by DisplayRow and worktree new.
+const windowSep = "  ·  "
+
+// ParseWindowName parses a tmux window name back into its components.
+//
+// Grove window names follow two formats:
+//
+//	"home"                          → isHome=true
+//	"<repo>[padding]  ·  <branch>" → repo and branch extracted and trimmed
+//
+// For names that do not match either format (manually created windows),
+// repo is set to the raw name and branch is empty.
+func ParseWindowName(s string) (repo, branch string, isHome bool) {
+	if s == "home" {
+		return "", "", true
+	}
+	if idx := strings.Index(s, windowSep); idx != -1 {
+		return strings.TrimSpace(s[:idx]), strings.TrimSpace(s[idx+len(windowSep):]), false
+	}
+	return s, "", false
+}

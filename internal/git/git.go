@@ -54,6 +54,15 @@ func IsWorktree(dir string) (bool, error) {
 	return gitDir != commonDir, nil
 }
 
+// BranchExists reports whether the given branch name exists in dir.
+func BranchExists(dir, branch string) (bool, error) {
+	out, err := run(dir, "branch", "--list", branch)
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
 // RepoName returns the repository name for a working tree.
 //
 // Resolution order:

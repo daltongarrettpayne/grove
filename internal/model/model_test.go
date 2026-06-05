@@ -96,6 +96,54 @@ func TestLaneDisplayRow(t *testing.T) {
 	}
 }
 
+func TestParseWindowName(t *testing.T) {
+	tests := []struct {
+		input      string
+		wantRepo   string
+		wantBranch string
+		wantIsHome bool
+	}{
+		{
+			input:      "home",
+			wantIsHome: true,
+		},
+		{
+			input:      "grove  ·  main",
+			wantRepo:   "grove",
+			wantBranch: "main",
+		},
+		{
+			// DisplayRow with padding: repo padded to 10, separator, branch
+			input:      "grove       ·  feat/auth",
+			wantRepo:   "grove",
+			wantBranch: "feat/auth",
+		},
+		{
+			// worktree new format: no padding
+			input:      "kalashnikov.ai  ·  feat/user-auth",
+			wantRepo:   "kalashnikov.ai",
+			wantBranch: "feat/user-auth",
+		},
+		{
+			// Unrecognised format: no separator
+			input:      "my-custom-window",
+			wantRepo:   "my-custom-window",
+			wantBranch: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			repo, branch, isHome := model.ParseWindowName(tt.input)
+			if repo != tt.wantRepo || branch != tt.wantBranch || isHome != tt.wantIsHome {
+				t.Errorf("ParseWindowName(%q) = (%q, %q, %v), want (%q, %q, %v)",
+					tt.input, repo, branch, isHome,
+					tt.wantRepo, tt.wantBranch, tt.wantIsHome)
+			}
+		})
+	}
+}
+
 func TestContextMaxRepoLen(t *testing.T) {
 	tests := []struct {
 		name  string
