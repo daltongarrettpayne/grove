@@ -111,6 +111,55 @@ func ListWorktrees(repoDir string) ([]WorktreeEntry, error) {
 	return entries, nil
 }
 
+// GetDefaultBranch returns the default branch name for the repo in dir.
+// Resolution order: git symbolic-ref refs/remotes/origin/HEAD, then "main".
+func GetDefaultBranch(dir string) (string, error) {
+	out, err := run(dir, "symbolic-ref", "refs/remotes/origin/HEAD")
+	if err == nil && out != "" {
+		return strings.TrimPrefix(out, "refs/remotes/origin/"), nil
+	}
+	// Fallback: check if main exists remotely.
+	if _, err2 := run(dir, "rev-parse", "--verify", "refs/remotes/origin/main"); err2 == nil {
+		return "main", nil
+	}
+	return "main", nil
+}
+
+// GetMergedBranches returns local branch names that are fully merged into base.
+// base itself is excluded from the result.
+func GetMergedBranches(dir, base string) ([]string, error) {
+	out, err := run(dir, "branch", "--merged", base, "--format=%(refname:short)")
+	if err != nil {
+		return nil, fmt.Errorf("branch --merged: %w", err)
+	}
+	var branches []string
+	for _, b := range strings.Split(out, "\n") {
+		b = strings.TrimSpace(b)
+		if b != "" && b != base {
+			branches = append(branches, b)
+		}
+	}
+	return branches, nil
+}
+
+// IsDirty reports whether dir has uncommitted changes (staged or unstaged).
+func IsDirty(dir string) (bool, error) {
+	out, err := run(dir, "status", "--porcelain")
+	if err != nil {
+		return false, fmt.Errorf("git status: %w", err)
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
+// HasRemoteTracking reports whether branch in dir has a remote tracking ref.
+func HasRemoteTracking(dir, branch string) (bool, error) {
+	out, err := run(dir, "branch", "-vv", "--list", branch)
+	if err != nil {
+		return false, fmt.Errorf("branch -vv: %w", err)
+	}
+	return strings.Contains(out, "[origin/"), nil
+}
+
 // RepoName returns the repository name for a working tree.
 //
 // Resolution order:
