@@ -16,10 +16,10 @@ func TestIsKebabCase(t *testing.T) {
 		{"my-repo-123", true},
 		{"a", true},
 		{"123", true},
-		{"Grove", false},          // uppercase
-		{"my_repo", false},        // underscore
-		{"my repo", false},        // space
-		{"my-Repo", false},        // mixed case
+		{"Grove", false},   // uppercase
+		{"my_repo", false}, // underscore
+		{"my repo", false}, // space
+		{"my-Repo", false}, // mixed case
 		{"-starts-with-hyphen", false},
 		{"", false},
 	}

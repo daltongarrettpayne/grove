@@ -1,0 +1,36 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  release:
+    name: Build and release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build binaries
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          LDFLAGS="-X main.Version=${VERSION}"
+          TARGETS="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64"
+          mkdir -p dist
+          for TARGET in $TARGETS; do
+            OS=$(echo $TARGET | cut -d/ -f1)
+            ARCH=$(echo $TARGET | cut -d/ -f2)
+            OUT="dist/grove_${OS}_${ARCH}"
+            GOOS=$OS GOARCH=$ARCH go build -ldflags "$LDFLAGS" -o "$OUT" ./cmd/grove
+            chmod +x "$OUT"
+          done
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
