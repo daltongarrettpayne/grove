@@ -3,9 +3,9 @@
 // It creates a fake code root and a fake vault tree that covers every context
 // shape grove needs to handle:
 //
-//   kalashnikov  — multi-repo project: main clone + a linked worktree
-//   grove        — single-repo project
-//   plain        — context with no code directory (vault note only)
+//	coding-project-big   — two main repos, each with multiple worktrees
+//	coding-project-small — one main repo plus a single worktree
+//	non-coding-project   — no code directory (vault note only)
 //
 // The generated world doubles as the Docker clean-room fixture and the test
 // harness fixture — same data, two uses.
@@ -59,9 +59,9 @@ func generate(root string) error {
 // buildVault creates the fake knowledge tree.
 func buildVault(root string) error {
 	dirs := []string{
-		"01-Projects/kalashnikov",
-		"01-Projects/grove",
-		"01-Projects/plain", // plain context: vault note exists, no code dir
+		"01-Projects/coding-project-big",
+		"01-Projects/coding-project-small",
+		"01-Projects/non-coding-project",
 		"02-Areas/health",
 		"06-Meta/holmes-os",
 	}
@@ -70,8 +70,7 @@ func buildVault(root string) error {
 			return err
 		}
 	}
-	// Drop a context note in each project dir so vault scanning has something to find.
-	for _, proj := range []string{"kalashnikov", "grove", "plain"} {
+	for _, proj := range []string{"coding-project-big", "coding-project-small", "non-coding-project"} {
 		note := filepath.Join(root, "01-Projects", proj, "context.md")
 		content := fmt.Sprintf("# %s\n\nfixture context note\n", proj)
 		if err := os.WriteFile(note, []byte(content), 0644); err != nil {
@@ -81,26 +80,41 @@ func buildVault(root string) error {
 	return nil
 }
 
-// buildCode creates the fake code root with git repos and one worktree.
+// buildCode creates the fake code root with git repos and worktrees.
 func buildCode(root string) error {
-	// kalashnikov: main repo on `main` + a linked worktree on `feat/landing`
-	kContainer := filepath.Join(root, "kalashnikov")
-	kMain := filepath.Join(kContainer, "kalashnikov")
-	kWorktree := filepath.Join(kContainer, "kalashnikov-web")
+	// coding-project-big: two repos, each with multiple worktrees.
+	bigContainer := filepath.Join(root, "coding-project-big")
 
-	if err := initRepo(kMain, "main"); err != nil {
-		return fmt.Errorf("kalashnikov main: %w", err)
+	alphaMain := filepath.Join(bigContainer, "repo-alpha")
+	if err := initRepo(alphaMain, "main"); err != nil {
+		return fmt.Errorf("coding-project-big/repo-alpha: %w", err)
 	}
-	if err := addWorktree(kMain, kWorktree, "feat/landing"); err != nil {
-		return fmt.Errorf("kalashnikov worktree: %w", err)
+	if err := addWorktree(alphaMain, filepath.Join(bigContainer, "repo-alpha-wt-one"), "feat/one"); err != nil {
+		return fmt.Errorf("coding-project-big/repo-alpha-wt-one: %w", err)
 	}
-
-	// grove: single repo on `main`
-	if err := initRepo(filepath.Join(root, "grove", "grove"), "main"); err != nil {
-		return fmt.Errorf("grove: %w", err)
+	if err := addWorktree(alphaMain, filepath.Join(bigContainer, "repo-alpha-wt-two"), "feat/two"); err != nil {
+		return fmt.Errorf("coding-project-big/repo-alpha-wt-two: %w", err)
 	}
 
-	// plain has no code directory — just the vault note above.
+	betaMain := filepath.Join(bigContainer, "repo-beta")
+	if err := initRepo(betaMain, "main"); err != nil {
+		return fmt.Errorf("coding-project-big/repo-beta: %w", err)
+	}
+	if err := addWorktree(betaMain, filepath.Join(bigContainer, "repo-beta-ui"), "feat/ui"); err != nil {
+		return fmt.Errorf("coding-project-big/repo-beta-ui: %w", err)
+	}
+
+	// coding-project-small: one main repo plus a single worktree.
+	smallContainer := filepath.Join(root, "coding-project-small")
+	smallMain := filepath.Join(smallContainer, "repo")
+	if err := initRepo(smallMain, "main"); err != nil {
+		return fmt.Errorf("coding-project-small/repo: %w", err)
+	}
+	if err := addWorktree(smallMain, filepath.Join(smallContainer, "repo-feat"), "feat/landing"); err != nil {
+		return fmt.Errorf("coding-project-small/repo-feat: %w", err)
+	}
+
+	// non-coding-project has no code directory — just the vault note above.
 	return nil
 }
 
@@ -131,7 +145,6 @@ func addWorktree(mainRepo, dest, branch string) error {
 func gitRun(dir string, args ...string) error {
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Dir = dir
-	// Override author env vars so `git commit` never fails due to missing identity.
 	cmd.Env = append(os.Environ(),
 		"GIT_AUTHOR_NAME=Grove Fixture",
 		"GIT_AUTHOR_EMAIL=fixture@grove.test",

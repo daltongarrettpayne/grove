@@ -341,6 +341,11 @@ func TestDisplayRow(t *testing.T) {
 fake code root and home tree. Tests use this, never `~/code` or `~/life-vault`.
 The Docker clean-room uses the same fixture, making it the portability proof.
 
+Fixture contexts (under `vault/01-Projects/`):
+- `coding-project-big` — two repos (`repo-alpha`, `repo-beta`), each with multiple worktrees
+- `coding-project-small` — one repo (`repo`) with a single worktree
+- `non-coding-project` — no code directory (vault note only)
+
 **Run tests:**
 ```sh
 go test ./...                          # all unit tests
