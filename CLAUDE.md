@@ -1,23 +1,33 @@
 # CLAUDE.md — grove
 
-Grove is a focused CLI tool that weaves a knowledge tree (vault) and a code
-tree into tmux sessions. HOLMES OS is its first configuration, not the tool
-itself. The engine is generic; all opinionated choices live in user config.
+Grove is a Go CLI that weaves a knowledge tree (vault) and a code tree into tmux sessions. It enforces one workspace model — context = session, lanes = windows, home lane pinned, session derived from disk — so the workspace is stateless, idempotent, and reconstructible. HOLMES OS is one configuration of it, not the tool itself. The engine is generic; all opinionated choices live in user config.
 
-**Status:** Go module initialized, design finalized, implementation starting.
-**Vault home:** `~/life-vault/01-Projects/grove/`
+**Repo:** `~/code/grove/grove/` (main) or a worktree for feature branches.
 **Design doc (source of truth):** `docs/design.md`
 
 ---
 
-## The model in one paragraph
+## Two-audience model
 
-A **context** = a tmux session. It has **lanes** (windows) and **views**
-(panes). Lane 0 is always `home` — the context's home directory. Every other
-lane is a working tree identified by `(repo, branch)` — two worktrees of the
-same repo get separate lanes. A context's **source set** is one-or-more
-container directories scanned for working trees. Picker rows follow the
-display grammar locked in the design doc.
+- **User:** installs via `go install` (Homebrew tap coming), sets `GROVE_CODE_ROOT` and `GROVE_HOME_ROOT`, runs grove against their existing vault + code root. Never touches source.
+- **Contributor:** works in worktrees off main, opens PRs, runs CI locally. This file is the contributor guide.
+
+---
+
+## The model (the cement)
+
+A **context** = a tmux session. It has **lanes** (windows) and **views** (panes). Lane 0 is always `home` — the context's home directory. Every other lane is a working tree identified by `(repo, branch)` — two worktrees of the same repo get separate lanes because git forbids one branch in two worktrees.
+
+A context's **source set** is one-or-more container directories scanned for working trees:
+- one container → a single-project context
+- many containers → a cockpit context
+- zero containers → a plain context (home lane only)
+
+**The session is a pure function of disk state.** No daemon, no cached state — every `session open` derives the workspace from the filesystem. This is the property that makes the workspace portable, durable, and reconstructible.
+
+The **home tree** (pointed at by `GROVE_HOME_ROOT`) is the spine: its `01-Projects/` and `02-Areas/` subdirectories are the contexts. Filing controls lifecycle — archive a context folder and its session stops being offered.
+
+See `docs/design.md` for the full model, display grammar, and design decisions.
 
 ---
 
@@ -27,45 +37,49 @@ display grammar locked in the design doc.
 grove/
 ├── cmd/
 │   └── grove/
-│       └── main.go          # Entry point — stays tiny, delegates everything
+│       └── main.go              # Entry point — tiny, delegates to cli.Execute()
 ├── internal/
-│   ├── cli/                 # Cobra command definitions
-│   │   ├── root.go          # Root command, global flags, version
-│   │   ├── session.go       # session open / session list
-│   │   ├── window.go        # window (picker)
-│   │   ├── worktree.go      # worktree new
-│   │   └── status.go        # status-segment
-│   ├── model/               # Domain model: Context, Lane, SourceSet (package model)
-│   ├── tmux/                # Thin wrapper over tmux shell-outs
-│   ├── git/                 # Thin wrapper over git shell-outs
-│   ├── config/              # Config loading (file + env + defaults)
-│   ├── scanner/             # Scans code root and home tree
-│   ├── picker/              # Picker row protocol; fzf integration
-│   └── log/                 # Structured logging setup (thin wrapper on slog)
+│   ├── cli/                     # Cobra command definitions
+│   │   ├── root.go              # Root command, global flags, PersistentPreRunE (config + logger)
+│   │   ├── session.go           # session open / session list
+│   │   ├── window.go            # window list / window pick
+│   │   ├── worktree.go          # worktree new
+│   │   ├── status.go            # status-segment
+│   │   └── doctor.go            # doctor (8 check categories)
+│   ├── model/                   # Domain types: Context, Lane, SourceSet, LaneKind
+│   │   ├── model.go             # Core types and DisplayRow / ParseWindowName
+│   │   ├── convention.go        # ValidateBranchName, IsKebabCase
+│   │   └── model_test.go / convention_test.go
+│   ├── tmux/
+│   │   └── tmux.go              # Thin shell-out wrapper: HasSession, NewSession, AttachOrSwitch, etc.
+│   ├── git/
+│   │   └── git.go               # Thin shell-out wrapper: IsRepo, IsWorktree, CurrentBranch, etc.
+│   ├── config/
+│   │   └── config.go            # Config struct + Load() (env vars + defaults)
+│   ├── scanner/
+│   │   └── scanner.go           # ScanSourceSet: walks a container directory → []Lane
+│   ├── picker/
+│   │   └── picker.go            # Fzf integration; ErrCancelled sentinel
+│   └── log/
+│       └── log.go               # Setup() — thin wrapper on log/slog
 ├── test/
-│   ├── fixtures/            # Deterministic synthetic world for tests
-│   └── integration/         # Integration tests (build tag: integration)
+│   ├── fixtures/
+│   │   ├── fixtures.go          # Fixture world definition
+│   │   └── gen/main.go          # Generator: writes deterministic fake root to /tmp/grove-fixtures
+│   └── integration/             # Integration tests (build tag: integration)
 ├── docs/
-│   └── design.md
+│   └── design.md                # Source of truth for the model, decisions, and open questions
 ├── Makefile
 ├── go.mod
 ├── go.sum
 └── CLAUDE.md
 ```
 
-<!-- NOTE for Dalton: the cmd/ vs internal/ split is a Go convention.
-     cmd/ holds the "main packages" — the actual executables. Go requires a
-     file with `package main` and a `main()` function to produce a binary.
-     internal/ holds everything else. Go ENFORCES that nothing outside this
-     module can import from internal/ — it's the language's way of making
-     private packages truly private. Use internal/ for 95% of the code. -->
+<!-- NOTE: cmd/ vs internal/ split is a Go convention. cmd/ holds main packages (the actual executables). internal/ holds everything else; Go enforces that nothing outside this module can import from internal/. -->
 
 ---
 
 ## Go naming conventions
-
-<!-- Go has strong, community-enforced naming rules. The compiler won't stop
-     you from violating them but every other Go programmer will notice. -->
 
 | Thing | Convention | Example |
 |---|---|---|
@@ -76,30 +90,23 @@ grove/
 | Error variables | start with `Err` | `ErrNotFound`, `ErrNoTmux` |
 | Single-letter receivers | short, not `self` or `this` | `(c *Context)`, `(s *Scanner)` |
 
-<!-- "Exported" means visible outside the package. In Go, if the first letter
-     is uppercase, it's exported. Lowercase = package-private. This is the
-     ONLY access modifier Go has — no public/private keywords. -->
-
-**Avoid stutter.** Don't write `context.ContextType` — the package name already
-provides the namespace, so `context.Type` or just `context.Context` is right.
+**Avoid stutter.** Don't write `context.ContextType` — the package name already provides the namespace, so `context.Type` is right.
 
 ---
 
 ## Error handling
 
-<!-- Go has no exceptions. Every function that can fail returns an error as its
-     last return value. The caller always checks it. This is verbose but
-     explicit — you never wonder where an exception might have been thrown. -->
+Go has no exceptions. Every function that can fail returns an error as its last return value.
 
 **Always wrap errors with context:**
 
 ```go
-// ✓ wrap with %w so the caller can unwrap it later
+// wrap with %w so the caller can unwrap it later
 if err != nil {
     return fmt.Errorf("scanning code root %s: %w", root, err)
 }
 
-// ✓ check specific error types
+// check specific error types
 if errors.Is(err, os.ErrNotExist) {
     // handle missing directory
 }
@@ -108,20 +115,20 @@ if errors.Is(err, os.ErrNotExist) {
 **Never:**
 
 ```go
-// ✗ silent discard
+// silent discard
 _ = someOperation()
 
-// ✗ log.Fatal in library code — panics the whole program, caller can't handle it
+// log.Fatal in library code — panics the whole program, caller can't handle it
 log.Fatal(err)
 
-// ✗ bare error with no context
+// bare error with no context
 return errors.New("failed")
 ```
 
 **Domain errors live in the relevant package:**
 
 ```go
-// internal/tmux/errors.go
+// internal/tmux/tmux.go (or errors.go)
 var ErrTmuxNotRunning = errors.New("tmux server is not running")
 var ErrSessionExists  = errors.New("session already exists")
 ```
@@ -130,21 +137,15 @@ var ErrSessionExists  = errors.New("session already exists")
 
 ## Interface design
 
-<!-- Interfaces in Go describe behavior, not identity. A type satisfies an
-     interface automatically if it has the right methods — no "implements"
-     keyword needed. This lets you define interfaces at the point of USE,
-     not at the point of definition. -->
-
-**Keep interfaces small and define them where they're consumed:**
+Keep interfaces small and define them where they're consumed:
 
 ```go
-// internal/picker/picker.go — the picker package defines what it needs
+// internal/picker/picker.go
 type Backend interface {
-    // Select sends rows to the picker and returns the chosen row.
     Select(rows []string) (string, error)
 }
 
-// internal/tmux/tmux.go — tmux package defines its own minimal interface
+// internal/tmux/tmux.go
 type SessionManager interface {
     HasSession(name string) (bool, error)
     NewSession(name, dir string) error
@@ -152,62 +153,53 @@ type SessionManager interface {
 }
 ```
 
-**Accept interfaces, return concrete types:**
+Accept interfaces, return concrete types:
 
 ```go
-// ✓ caller can pass any Backend (fzf, sk, test stub)
+// caller can pass any Backend (fzf, sk, test stub)
 func NewPicker(backend Backend) *Picker { ... }
-
-// ✗ locks the caller to fzf specifically
-func NewPicker(fzf *FzfBackend) *Picker { ... }
 ```
 
 ---
 
 ## CLI structure (Cobra)
 
-<!-- Cobra is the standard Go CLI framework — used by Kubernetes, Docker, Hugo.
-     It handles subcommands, flags, help text, and shell completion.
-     The pattern: a Command object per subcommand, wired into a tree. -->
-
-**Root command in `internal/cli/root.go`:**
+Root command in `internal/cli/root.go`:
 
 ```go
 var rootCmd = &cobra.Command{
-    Use:   "grove",
-    Short: "Weave your knowledge tree and code tree into tmux sessions",
-    // SilenceUsage: true prevents Cobra from printing usage on every error
-    SilenceUsage: true,
-}
-
-// Execute is called from cmd/grove/main.go
-func Execute() error {
-    return rootCmd.Execute()
+    Use:          "grove",
+    Short:        "Weave your knowledge tree and code tree into tmux sessions",
+    SilenceUsage: true,   // don't print usage on every runtime error
+    SilenceErrors: true,  // main.go controls the error message format
+    PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+        // loads config and inits logger before every subcommand
+    },
 }
 ```
 
-**Subcommand pattern:**
+Subcommand pattern (two-level: `grove session open`):
 
 ```go
 // internal/cli/session.go
 var sessionOpenCmd = &cobra.Command{
     Use:   "open <context>",
-    Short: "Open or attach to a context session",
+    Short: "Open or attach to a context session (idempotent)",
+    Long:  `...`,
+    Example: `...`,
     Args:  cobra.ExactArgs(1),
-    // RunE returns an error; RunE > Run because Run can't signal failure
     RunE: func(cmd *cobra.Command, args []string) error {
         return runSessionOpen(args[0])
     },
 }
 
-// init() registers subcommands; Go calls init() automatically at package load
 func init() {
     sessionCmd.AddCommand(sessionOpenCmd)
     rootCmd.AddCommand(sessionCmd)
 }
 ```
 
-**`main.go` stays minimal:**
+`main.go` stays minimal:
 
 ```go
 package main
@@ -228,24 +220,20 @@ func main() {
 
 ## Configuration
 
-Config priority (high → low): flags → environment variables → config file → defaults.
+Config priority (high to low): flags > environment variables > defaults.
 
 ```go
 // internal/config/config.go
 type Config struct {
-    CodeRoot  string // root scanned for code repos, e.g. ~/code
-    HomeRoot  string // root of the knowledge tree, e.g. ~/life-vault
+    CodeRoot   string // root scanned for code repos, e.g. ~/code
+    HomeRoot   string // root of the knowledge tree, e.g. ~/life-vault
     TmuxSocket string // optional: path to a private tmux socket
-    Picker   string // picker binary, default "fzf"
-    LogLevel string // "debug" | "info" | "warn" | "error"
+    Picker     string // picker binary, default "fzf"
+    LogLevel   string // "debug" | "info" | "warn" | "error"
 }
 ```
 
-<!-- Environment variables let grove work without a config file on a fresh
-     machine, and let the Docker sandbox override paths without touching disk. -->
-
-Environment variables: `GROVE_CODE_ROOT`, `GROVE_HOME_ROOT`, `GROVE_PICKER`,
-`GROVE_LOG_LEVEL`. Documented in `grove help config`.
+Environment variables: `GROVE_CODE_ROOT`, `GROVE_HOME_ROOT`, `GROVE_TMUX_SOCKET`, `GROVE_PICKER`, `GROVE_LOG_LEVEL`.
 
 No hardcoded personal paths ever — config/env only.
 
@@ -253,38 +241,24 @@ No hardcoded personal paths ever — config/env only.
 
 ## Logging
 
-Use `log/slog` (Go standard library since 1.21). Never `fmt.Println` for
-observability output.
+Use `log/slog` (Go standard library since 1.21). Never `fmt.Println` for observability output.
 
 ```go
-// internal/log/log.go
-import "log/slog"
-
-// Quiet by default. --verbose or GROVE_LOG_LEVEL=debug enables debug output.
-// Structured output means logs are machine-parseable (JSON mode).
-```
-
-```go
-// In application code
 slog.Info("session opened", "name", sessionName, "lanes", len(lanes))
 slog.Debug("scanning directory", "path", dir)
 slog.Error("tmux shell-out failed", "cmd", cmd, "err", err)
 ```
 
-<!-- Structured logging = key-value pairs alongside the message. This lets you
-     grep for specific fields, pipe to jq, and see performance regressions over
-     time without parsing free-form strings. -->
+Quiet by default. `--verbose` flag or `GROVE_LOG_LEVEL=debug` enables debug output.
 
 ---
 
 ## Shelling out (tmux + git)
 
-Grove drives tmux and git by shelling out to their CLIs. Never use a tmux
-control-mode or libgit2 binding — shell-out is simpler and more durable.
+Grove drives tmux and git by shelling out to their CLIs. Never use tmux control-mode or libgit2 — shell-out is simpler and more durable.
 
 ```go
-// internal/tmux/exec.go
-// run executes a tmux command and returns stdout.
+// internal/tmux/tmux.go
 func run(args ...string) (string, error) {
     cmd := exec.Command("tmux", args...)
     out, err := cmd.Output()
@@ -295,31 +269,29 @@ func run(args ...string) (string, error) {
 }
 ```
 
-Always validate preconditions before mutating tmux state (is the session
-already running? does the directory exist?). Never half-build a session.
+Always validate preconditions before mutating tmux state (does the session exist? does the directory exist?). Never half-build a session.
 
 ---
 
 ## Testing
 
-**Unit tests** live next to the file they test: `scanner.go` → `scanner_test.go`.
+**Unit tests** live next to the file they test: `scanner.go` -> `scanner_test.go`.
 
-**Table-driven tests** are the Go idiom for multiple cases:
+**Table-driven tests** are the Go idiom:
 
 ```go
 func TestDisplayRow(t *testing.T) {
     tests := []struct {
-        name  string   // human name shown on test failure
+        name  string
         input Lane
         want  string
     }{
         {"home lane", Lane{IsHome: true}, "home"},
         {"regular lane", Lane{Repo: "grove", Branch: "main"}, "grove  ·  main"},
     }
-
     for _, tt := range tests {
         t.Run(tt.name, func(t *testing.T) {
-            got := tt.input.DisplayRow()
+            got := tt.input.DisplayRow(len(tt.input.Repo))
             if got != tt.want {
                 t.Errorf("got %q, want %q", got, tt.want)
             }
@@ -328,33 +300,52 @@ func TestDisplayRow(t *testing.T) {
 }
 ```
 
-**Integration tests** are tagged so they only run when explicitly requested:
+**Integration tests** require tmux + fzf and are gated by a build tag:
 
 ```go
 //go:build integration
-
 // test/integration/session_test.go
-// These hit real tmux — run with: go test -tags integration ./test/integration/
 ```
 
-**Fixtures** — `test/fixtures/` contains a generator that creates a deterministic
-fake code root and home tree. Tests use this, never `~/code` or `~/life-vault`.
-The Docker clean-room uses the same fixture, making it the portability proof.
+**Fixtures** — `test/fixtures/` contains a generator (`test/fixtures/gen/main.go`) that creates a deterministic fake world at `/tmp/grove-fixtures`:
+- `vault/01-Projects/coding-project-big` — two repos (`repo-alpha`, `repo-beta`), each with multiple worktrees
+- `vault/01-Projects/coding-project-small` — one repo (`repo`) with a single worktree
+- `vault/01-Projects/non-coding-project` — vault note only, no code directory
+- `vault/02-Areas/` — area contexts
 
-Fixture contexts (under `vault/01-Projects/`):
-- `coding-project-big` — two repos (`repo-alpha`, `repo-beta`), each with multiple worktrees
-- `coding-project-small` — one repo (`repo`) with a single worktree
-- `non-coding-project` — no code directory (vault note only)
+Tests use `/tmp/grove-fixtures`, never `~/code` or `~/life-vault`.
 
 **Run tests:**
+
 ```sh
-go test ./...                          # all unit tests
-go test -race ./...                    # with race detector (always run this)
-go test -tags integration ./test/...  # integration tests
+make test                 # go test -race -cover ./...
+make test-integration     # generates fixtures, then go test -race -tags integration ./test/...
+make lint                 # golangci-lint run
 ```
 
-<!-- The race detector finds concurrency bugs. Go makes concurrency easy, which
-     makes races easy to introduce accidentally. Always test with -race. -->
+---
+
+## Worktree workflow (developing grove with grove)
+
+Grove's own worktree commands work on grove itself. From inside the `grove` tmux session:
+
+```sh
+# Create a feature branch and worktree:
+grove worktree new feat/my-feature
+
+# This creates ~/code/grove/grove-my-feature/ and opens it in a new tmux window.
+# Work there, then:
+gh pr create
+
+# After the PR merges, clean up:
+grove worktree delete feat/my-feature   # (or: git worktree remove + close window)
+```
+
+You can also target the repo explicitly from outside a tmux session:
+
+```sh
+grove worktree new feat/my-feature --repo ~/code/grove/grove
+```
 
 ---
 
@@ -368,29 +359,42 @@ make clean   # rm -rf bin/
 ```
 
 Version is injected at build time:
+
 ```sh
 go build -ldflags="-X main.Version=0.1.0" ./cmd/grove
 ```
 
-<!-- ldflags lets you set Go variables from outside the source code at build
-     time. This is the standard pattern for embedding version info without
-     hardcoding it in source. -->
+Docker clean-room (also the portability proof):
+
+```sh
+make docker-build   # build the image
+make docker-run     # interactive shell inside the clean-room with fixtures + tmux
+```
 
 ---
 
-## Dependencies
+## CI
 
-Keep the dependency tree minimal. Prefer the standard library.
+CI runs on every PR via GitHub Actions (`.github/workflows/ci.yml`):
+- `go test -race ./...` on ubuntu-latest and macos-latest
+- `golangci-lint run`
+- `go build ./cmd/grove`
 
-| Dep | Purpose | Why not stdlib |
-|---|---|---|
-| `github.com/spf13/cobra` | CLI subcommand framework | stdlib `flag` has no subcommand tree |
-| (stdlib) `log/slog` | Structured logging | Built in since Go 1.21 |
-| (stdlib) `os/exec` | Shell-out to tmux/git | Built in |
-| (stdlib) `encoding/json` | JSON/TSV output | Built in |
+Integration tests (require tmux + fzf) are not in CI by default; run locally with `make test-integration`.
 
-Add a dependency only when the stdlib gap is real. Run `go mod tidy` before
-every commit.
+**Run locally before pushing:**
+
+```sh
+make test && make lint
+```
+
+---
+
+## Branch rules
+
+- All changes via PR — no direct push to main.
+- No force push.
+- CI must pass before merge.
 
 ---
 
@@ -398,16 +402,39 @@ every commit.
 
 `✨ feat:`, `🐛 fix:`, `🔧 chore:`, `📚 docs:`, `🧪 test:`, `♻️ refactor:`
 
-No personal paths, no hardcoded creds, no vault content in commits.
+No personal paths, no hardcoded credentials, no vault content in commits.
 
 ---
 
-## Build order (from design.md)
+## Command map (current)
 
-0. Cleanup pass (pre-build; stabilize the live system)
-1. Contracts + config-driven roots
-2. `grove project list` — scan, emit JSON/TSV
-3. `grove session open <ctx>` — idempotent build
-4. `grove worktree new <branch>`
-5. `grove window` — picker
-6. `grove status-segment`
+| Command | File | What it does |
+|---|---|---|
+| `grove session open <ctx>` | `internal/cli/session.go` | Scans vault tiers for context, validates home dir, creates session + windows, attaches |
+| `grove session list` | `internal/cli/session.go` | Scans vault tiers, emits all contexts + lanes as JSON |
+| `grove window list [<ctx>]` | `internal/cli/window.go` | Lists picker rows for a context; marks current window with `*` |
+| `grove window pick` | `internal/cli/window.go` | Runs fzf over window rows for the current session, switches to selection |
+| `grove worktree new <branch>` | `internal/cli/worktree.go` | Creates linked worktree at `<repo>-<slug>/`, optionally adds tmux window |
+| `grove status-segment` | `internal/cli/status.go` | Prints `<session> › <repo> · <branch>` for tmux status-right |
+| `grove doctor` | `internal/cli/doctor.go` | Runs 8 audit checks; exits 1 if any violations found |
+
+---
+
+## Build order / roadmap
+
+Completed:
+- Contracts + config-driven roots (env vars, Config struct)
+- `grove session list` — scan, emit JSON
+- `grove session open` — idempotent build
+- `grove worktree new` — creates worktree + tmux window
+- `grove window list` / `grove window pick` — picker
+- `grove status-segment`
+- `grove doctor` — 8 check categories
+
+In parallel branches (will merge):
+- `grove project init` / `grove project list` / `grove project archive`
+- `grove session delete`
+- `grove worktree list` / `grove worktree delete`
+- `grove window delete`
+
+Out of core (Q-H from design.md): focus unification, daily-recap, deeper status, full observability build-out, daemon/TUI.
