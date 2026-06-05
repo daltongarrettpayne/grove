@@ -467,9 +467,11 @@ func buildSessionPickRows() (rows []string, maxNameLen int, err error) {
 		if e.laneCount == 1 {
 			laneWord = "lane"
 		}
-		// Format: name (padded) + "  " + tier (padded to 7) + "  " + N lanes + optional "  *"
-		row := fmt.Sprintf("%-*s  %-7s  %d %s",
-			maxNameLen, e.name,
+		// Tab-delimited: name + TAB + rest. Fzf renders tabs as spaces so the
+		// display looks aligned, but splitting on \t always recovers the exact
+		// name even when it contains spaces (e.g. "AI Eng Job Hunt").
+		row := fmt.Sprintf("%s\t%-7s  %d %s",
+			e.name,
 			e.tier,
 			e.laneCount, laneWord,
 		)
@@ -540,8 +542,8 @@ func runSessionPick() error {
 		return fmt.Errorf("picker: %w", err)
 	}
 
-	// The first whitespace-delimited token in the chosen row is the context name.
-	name := strings.Fields(chosen)[0]
+	// Name is the first tab-delimited field — safe for names containing spaces.
+	name := strings.SplitN(chosen, "\t", 2)[0]
 	return runSessionOpen(name)
 }
 
