@@ -161,3 +161,18 @@ func ListWindows(session string) ([]string, error) {
 	}
 	return strings.Split(out, "\n"), nil
 }
+
+// KillWindow kills a window by name inside session.
+// Returns nil if the window was not found (idempotent).
+func KillWindow(session, windowName string) error {
+	target := session + ":" + windowName
+	err := exec.Command("tmux", "kill-window", "-t", target).Run()
+	if err == nil {
+		return nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return nil
+	}
+	return fmt.Errorf("tmux kill-window %q: %w", target, err)
+}
