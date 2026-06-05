@@ -4,6 +4,10 @@
 package cli
 
 import (
+	"log/slog"
+	"os"
+	"path/filepath"
+
 	"github.com/spf13/cobra"
 
 	"github.com/daltongarrettpayne/grove/internal/config"
@@ -61,7 +65,20 @@ its working trees become lanes in that context's session.`,
 		if verbose {
 			level = "debug"
 		}
-		grovelog.Setup(level)
+
+		// Open a JSON log file in ~/.local/share/grove/grove.log so every
+		// grove invocation is fully captured for debugging.
+		var fileOut *os.File
+		logDir := filepath.Join(os.Getenv("HOME"), ".local", "share", "grove")
+		if mkErr := os.MkdirAll(logDir, 0755); mkErr == nil {
+			f, fErr := os.OpenFile(filepath.Join(logDir, "grove.log"),
+				os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+			if fErr == nil {
+				fileOut = f
+			}
+		}
+		grovelog.Setup(level, fileOut)
+		slog.Debug("grove invoked", "cmd", cmd.Name(), "log_level", level)
 		return nil
 	},
 }
