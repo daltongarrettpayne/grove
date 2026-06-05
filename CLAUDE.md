@@ -239,17 +239,38 @@ No hardcoded personal paths ever — config/env only.
 
 ---
 
-## Logging
+## Output philosophy
 
-Use `log/slog` (Go standard library since 1.21). Never `fmt.Println` for observability output.
+Every command must be **human-readable by default** and **machine-parseable on request**.
+
+- Default output is a clean, aligned plain-text table or a short confirmation line. No noise, no structured log lines, no JSON blobs.
+- Any command that lists data must accept a `--json` flag that emits a stable JSON array suitable for piping to `jq`, scripts, or LLM tools.
+- Error messages must be in plain English — translate OS errors (`invalid cross-device link`, `no such file`) into what actually went wrong from the user's perspective.
+- `slog.Info` / `slog.Debug` calls are for internal observability only. They are suppressed by default (`warn` log level). Never use slog for user-facing feedback — use `fmt.Printf` for that.
+
+Example pattern:
 
 ```go
-slog.Info("session opened", "name", sessionName, "lanes", len(lanes))
-slog.Debug("scanning directory", "path", dir)
+// user-facing confirmation — always visible
+fmt.Printf("archived %s\n      -> %s\n", src, dest)
+
+// internal trace — only with -v
+slog.Debug("archiving project", "src", src, "dest", dest)
+```
+
+---
+
+## Logging
+
+Use `log/slog` (Go standard library since 1.21) for internal observability only. Never use it for user-facing output.
+
+```go
+slog.Debug("scanning directory", "path", dir)   // -v only
+slog.Warn("tmux not running, skipping check", "err", err)
 slog.Error("tmux shell-out failed", "cmd", cmd, "err", err)
 ```
 
-Quiet by default. `--verbose` flag or `GROVE_LOG_LEVEL=debug` enables debug output.
+Default log level is `warn`. `--verbose` / `-v` flag or `GROVE_LOG_LEVEL=debug` enables debug output.
 
 ---
 
@@ -274,6 +295,14 @@ Always validate preconditions before mutating tmux state (does the session exist
 ---
 
 ## Testing
+
+**Tests are required for every new feature and every edge case.** CI will not pass without them. When adding a command or a non-trivial behaviour change, the PR must include:
+
+- A unit test for the core logic (config parsing, model methods, scanner behaviour, etc.)
+- A test for the error path (invalid input, not-found, already-exists, etc.)
+- If the change affects CLI output format, a test that asserts the shape of that output
+
+If a behaviour is untested, CI passing does not mean it works.
 
 **Unit tests** live next to the file they test: `scanner.go` -> `scanner_test.go`.
 
@@ -392,9 +421,16 @@ make test && make lint
 
 ## Branch rules
 
-- All changes via PR — no direct push to main.
-- No force push.
-- CI must pass before merge.
+This repo uses a GitFlow model:
+
+- `main` — stable, tagged releases only. Every commit here is a shipped version.
+- `develop` — integration target. All feature/fix PRs merge here first.
+- `feat/*`, `fix/*`, `chore/*` — short-lived, branch from `develop`, PR back to `develop`.
+- `hotfix/*` — branches from `main`, merges to both `main` AND `develop`.
+
+No direct push to `main` or `develop`. No force push. CI must pass before any merge.
+
+To release: open a PR from `develop` → `main`, merge, then tag (e.g. `v0.2.0`) — the release workflow builds binaries automatically.
 
 ---
 
@@ -411,7 +447,7 @@ No personal paths, no hardcoded credentials, no vault content in commits.
 | Command | File | What it does |
 |---|---|---|
 | `grove session open <ctx>` | `internal/cli/session.go` | Scans vault tiers for context, validates home dir, creates session + windows, attaches |
-| `grove session list` | `internal/cli/session.go` | Scans vault tiers, emits all contexts + lanes as JSON |
+| `grove session list [--json]` | `internal/cli/session.go` | Scans vault tiers, prints human-readable table (or JSON with `--json`) |
 | `grove window list [<ctx>]` | `internal/cli/window.go` | Lists picker rows for a context; marks current window with `*` |
 | `grove window pick` | `internal/cli/window.go` | Runs fzf over window rows for the current session, switches to selection |
 | `grove worktree new <branch>` | `internal/cli/worktree.go` | Creates linked worktree at `<repo>-<slug>/`, optionally adds tmux window |
