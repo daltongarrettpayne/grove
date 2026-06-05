@@ -276,7 +276,7 @@ func runWorktreeDelete(branch, repo string) error {
 		return fmt.Errorf("git worktree remove: %w", err)
 	}
 
-	slog.Info("removed worktree", "branch", branch, "dir", target.Dir)
+	fmt.Printf("removed worktree %s  (%s)\n", branch, target.Dir)
 
 	// Kill the matching tmux window if inside tmux.
 	if os.Getenv("TMUX") != "" {
