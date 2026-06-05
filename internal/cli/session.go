@@ -37,9 +37,36 @@ var sessionListCmd = &cobra.Command{
 	},
 }
 
+var sessionDeleteCmd = &cobra.Command{
+	Use:   "delete <name>",
+	Short: "Kill a running tmux session by name",
+	Args:  cobra.ExactArgs(1),
+	Long: `Kill a running tmux session by name.
+
+Preconditions:
+  - The named session must currently exist in tmux.
+
+What it does:
+  1. Verifies the session exists (fails loudly if not).
+  2. Runs tmux kill-session to terminate it.
+  3. Prints confirmation.
+
+Exits 0 on success. Exits non-zero if the session is not found or kill fails.`,
+	Example: `
+  # Delete a session named "grove":
+  grove session delete grove
+
+  # Delete the session for a project context:
+  grove session delete Kalashnikov.AI`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runSessionDelete(args[0])
+	},
+}
+
 func init() {
 	sessionCmd.AddCommand(sessionOpenCmd)
 	sessionCmd.AddCommand(sessionListCmd)
+	sessionCmd.AddCommand(sessionDeleteCmd)
 	rootCmd.AddCommand(sessionCmd)
 }
 
@@ -195,4 +222,19 @@ func runSessionList() error {
 // isHiddenName reports whether a directory name starts with a dot.
 func isHiddenName(name string) bool {
 	return len(name) > 0 && name[0] == '.'
+}
+
+func runSessionDelete(name string) error {
+	exists, err := tmux.HasSession(name)
+	if err != nil {
+		return fmt.Errorf("checking session %q: %w", name, err)
+	}
+	if !exists {
+		return fmt.Errorf("session %s not found", name)
+	}
+	if err := tmux.KillSession(name); err != nil {
+		return fmt.Errorf("killing session %q: %w", name, err)
+	}
+	fmt.Printf("deleted session %s\n", name)
+	return nil
 }

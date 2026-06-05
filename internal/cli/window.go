@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
@@ -47,9 +48,40 @@ var windowPickCmd = &cobra.Command{
 	},
 }
 
+var windowDeleteCmd = &cobra.Command{
+	Use:   "delete [<name>]",
+	Short: "Kill a window in the current tmux session",
+	Args:  cobra.MaximumNArgs(1),
+	Long: `Kill a window in the current tmux session.
+
+Preconditions:
+  - Must be run inside a tmux session ($TMUX must be set).
+
+What it does:
+  - With no argument: kills the current window.
+  - With a name argument: kills the named window in the current session.
+    The "home" window cannot be deleted.
+
+Exits 0 on success. Exits non-zero if not inside tmux, if the window is
+"home", or if tmux fails to kill the window.`,
+	Example: `
+  # Delete the current window:
+  grove window delete
+
+  # Delete a window by name:
+  grove window delete "grove  ·  feat/user-auth"`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			return runWindowDeleteCurrent()
+		}
+		return runWindowDelete(args[0])
+	},
+}
+
 func init() {
 	windowCmd.AddCommand(windowListCmd)
 	windowCmd.AddCommand(windowPickCmd)
+	windowCmd.AddCommand(windowDeleteCmd)
 	rootCmd.AddCommand(windowCmd)
 }
 
@@ -166,5 +198,38 @@ func runWindowPicker() error {
 	if err := tmux.SelectWindow(sessionName, chosen); err != nil {
 		return fmt.Errorf("selecting window: %w", err)
 	}
+	return nil
+}
+
+func runWindowDeleteCurrent() error {
+	if os.Getenv("TMUX") == "" {
+		return fmt.Errorf("grove window delete must be run inside a tmux session")
+	}
+	// kill-window with no -t kills the current window.
+	cmd := exec.Command("tmux", "kill-window")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("killing current window: %w", err)
+	}
+	fmt.Println("deleted current window")
+	return nil
+}
+
+func runWindowDelete(name string) error {
+	if os.Getenv("TMUX") == "" {
+		return fmt.Errorf("grove window delete must be run inside a tmux session")
+	}
+	if name == "home" {
+		return fmt.Errorf("cannot delete the home window")
+	}
+	sessionName, err := tmux.CurrentSessionName()
+	if err != nil {
+		return fmt.Errorf("getting current session name: %w", err)
+	}
+	if err := tmux.KillWindow(sessionName, name); err != nil {
+		return fmt.Errorf("killing window %q: %w", name, err)
+	}
+	fmt.Printf("deleted window %s\n", name)
 	return nil
 }
