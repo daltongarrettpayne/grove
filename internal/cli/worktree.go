@@ -15,6 +15,7 @@ import (
 
 	"github.com/daltongarrettpayne/grove/internal/git"
 	"github.com/daltongarrettpayne/grove/internal/model"
+	"github.com/daltongarrettpayne/grove/internal/scanner"
 	"github.com/daltongarrettpayne/grove/internal/tmux"
 )
 
@@ -131,14 +132,73 @@ clone, or git refuses to remove it (e.g. dirty working tree).`,
 	},
 }
 
+var worktreeCleanupDryRun bool
+var worktreeCleanupForce bool
+var worktreeCleanupKeepBranches bool
+var worktreeCleanupJSON bool
+
+var worktreeCleanupCmd = &cobra.Command{
+	Use:   "cleanup",
+	Short: "Remove linked worktrees whose branches have been merged",
+	Long: `Scan for linked worktrees whose branches have been merged into the default
+branch (or closed as merged on GitHub) and remove them.
+
+Scope:
+  - Run from inside a git repository: cleans up that repo's worktrees only.
+  - Run from outside a repo inside a grove tmux session: cleans up all repos
+    in the current context's code container.
+  - --repo <path> always forces single-repo mode.
+
+Merge detection:
+  Both signals are checked; either is sufficient to mark a worktree pruneable.
+  1. Local: git branch --merged <default>
+  2. GitHub: gh pr list --state merged --head <branch> (skipped if gh is absent
+     or unauthenticated)
+
+Branch deletion:
+  After removing a worktree, the local branch is deleted if it has a remote
+  tracking ref. Local-only branches are left alone. Use --keep-branches to
+  suppress all branch deletion.
+
+Dirty worktrees:
+  Worktrees with uncommitted changes are skipped and reported. Use --force to
+  delete them anyway.
+
+After all removals, git worktree prune is run to clear stale .git/worktrees entries.`,
+	Example: `
+  # Remove all merged worktrees for the repo in cwd:
+  grove worktree cleanup
+
+  # Preview without deleting:
+  grove worktree cleanup --dry-run
+
+  # Delete even if there are uncommitted changes:
+  grove worktree cleanup --force
+
+  # Keep local branches after removing worktrees:
+  grove worktree cleanup --keep-branches
+
+  # Scope to a specific repo:
+  grove worktree cleanup --repo ~/code/grove/grove`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runWorktreeCleanup(worktreeRepo, worktreeCleanupDryRun, worktreeCleanupForce, worktreeCleanupKeepBranches, worktreeCleanupJSON)
+	},
+}
+
 func init() {
 	worktreeNewCmd.Flags().StringVar(&worktreeRepo, "repo", "", "path to the main repo (defaults to cwd)")
 	worktreeListCmd.Flags().StringVar(&worktreeRepo, "repo", "", "path to the main repo (defaults to cwd)")
 	worktreeListCmd.Flags().BoolVar(&worktreeListJSON, "json", false, "output as JSON array")
 	worktreeDeleteCmd.Flags().StringVar(&worktreeRepo, "repo", "", "path to the main repo (defaults to cwd)")
+	worktreeCleanupCmd.Flags().StringVar(&worktreeRepo, "repo", "", "path to the main repo (defaults to cwd)")
+	worktreeCleanupCmd.Flags().BoolVar(&worktreeCleanupDryRun, "dry-run", false, "print what would be removed without deleting")
+	worktreeCleanupCmd.Flags().BoolVar(&worktreeCleanupForce, "force", false, "remove worktrees even if they have uncommitted changes")
+	worktreeCleanupCmd.Flags().BoolVar(&worktreeCleanupKeepBranches, "keep-branches", false, "do not delete local branches after removing worktrees")
+	worktreeCleanupCmd.Flags().BoolVar(&worktreeCleanupJSON, "json", false, "output as JSON array")
 	worktreeCmd.AddCommand(worktreeNewCmd)
 	worktreeCmd.AddCommand(worktreeListCmd)
 	worktreeCmd.AddCommand(worktreeDeleteCmd)
+	worktreeCmd.AddCommand(worktreeCleanupCmd)
 	rootCmd.AddCommand(worktreeCmd)
 }
 
@@ -345,6 +405,301 @@ func runWorktreeDelete(branch, repo string) error {
 			}
 		}
 	}
+
+	return nil
+}
+
+// cleanupResult records the outcome for one worktree.
+type cleanupResult struct {
+	Repo   string `json:"repo"`
+	Branch string `json:"branch"`
+	Dir    string `json:"dir"`
+	Action string `json:"action"` // "removed", "would-remove", "skipped"
+	Reason string `json:"reason,omitempty"`
+}
+
+func runWorktreeCleanup(repo string, dryRun, force, keepBranches, asJSON bool) error {
+	// Detect mode: single-repo if we can resolve a main repo, multi-repo otherwise.
+	mainRepo, err := resolveMainRepo(repo)
+	if err != nil {
+		// Multi-repo: requires a grove tmux session.
+		if repo != "" {
+			return err
+		}
+		if os.Getenv("TMUX") == "" {
+			return errors.New("not inside a git repo and not in a grove tmux session (set TMUX or use --repo)")
+		}
+		return runWorktreeCleanupMulti(dryRun, force, keepBranches, asJSON)
+	}
+	results, err := cleanupRepo(mainRepo, dryRun, force, keepBranches)
+	if err != nil {
+		return err
+	}
+	return printCleanupResults(results, asJSON)
+}
+
+// ghAvailableCache caches the result of the gh auth check.
+var ghAvailableCache struct {
+	checked bool
+	ok      bool
+}
+
+// isGHAvailable returns true if the gh CLI is installed and authenticated.
+func isGHAvailable() bool {
+	if ghAvailableCache.checked {
+		return ghAvailableCache.ok
+	}
+	ghAvailableCache.checked = true
+	err := exec.Command("gh", "auth", "status").Run()
+	ghAvailableCache.ok = (err == nil)
+	return ghAvailableCache.ok
+}
+
+// isMergedOnGitHub checks whether branch has a merged PR on GitHub.
+// Returns false if gh is unavailable or any error occurs.
+func isMergedOnGitHub(repoDir, branch string) bool {
+	if !isGHAvailable() {
+		return false
+	}
+	cmd := exec.Command("gh", "pr", "list",
+		"--state", "merged",
+		"--head", branch,
+		"--json", "number",
+		"--limit", "1",
+	)
+	cmd.Dir = repoDir
+	out, err := cmd.Output()
+	if err != nil {
+		slog.Debug("gh pr list failed", "branch", branch, "err", err)
+		return false
+	}
+	return strings.TrimSpace(string(out)) != "[]"
+}
+
+// cleanupRepo runs cleanup logic for a single main repo and returns the results.
+func cleanupRepo(mainRepo string, dryRun, force, keepBranches bool) ([]cleanupResult, error) {
+	defaultBranch, err := git.GetDefaultBranch(mainRepo)
+	if err != nil {
+		return nil, fmt.Errorf("detecting default branch in %s: %w", mainRepo, err)
+	}
+
+	mergedLocally, err := git.GetMergedBranches(mainRepo, defaultBranch)
+	if err != nil {
+		return nil, fmt.Errorf("listing merged branches in %s: %w", mainRepo, err)
+	}
+	mergedSet := make(map[string]bool, len(mergedLocally))
+	for _, b := range mergedLocally {
+		mergedSet[b] = true
+	}
+
+	entries, err := git.ListWorktrees(mainRepo)
+	if err != nil {
+		return nil, fmt.Errorf("listing worktrees in %s: %w", mainRepo, err)
+	}
+
+	repoName, err := git.RepoName(mainRepo)
+	if err != nil {
+		repoName = filepath.Base(mainRepo)
+	}
+
+	var sessionName string
+	var sessionWindows []string
+	if os.Getenv("TMUX") != "" {
+		sessionName, _ = tmux.CurrentSessionName()
+		if sessionName != "" {
+			sessionWindows, _ = tmux.ListWindows(sessionName)
+		}
+	}
+
+	var results []cleanupResult
+	for _, e := range entries {
+		if e.IsMain || e.Branch == "" || e.Branch == defaultBranch {
+			continue
+		}
+
+		merged := mergedSet[e.Branch] || isMergedOnGitHub(mainRepo, e.Branch)
+		if !merged {
+			continue
+		}
+
+		if !dryRun {
+			dirty, dirtyErr := git.IsDirty(e.Dir)
+			if dirtyErr != nil {
+				slog.Debug("could not check dirty state", "dir", e.Dir, "err", dirtyErr)
+			}
+			if dirty && !force {
+				results = append(results, cleanupResult{
+					Repo:   repoName,
+					Branch: e.Branch,
+					Dir:    e.Dir,
+					Action: "skipped",
+					Reason: "uncommitted changes (use --force)",
+				})
+				continue
+			}
+
+			removeArgs := []string{"-C", mainRepo, "worktree", "remove"}
+			if force {
+				removeArgs = append(removeArgs, "--force")
+			}
+			removeArgs = append(removeArgs, e.Dir)
+			if out, removeErr := exec.Command("git", removeArgs...).CombinedOutput(); removeErr != nil {
+				return nil, fmt.Errorf("git worktree remove %s: %s: %w", e.Branch, strings.TrimSpace(string(out)), removeErr)
+			}
+
+			// Kill matching tmux window.
+			if sessionName != "" {
+				windowName := repoName + "  ·  " + e.Branch
+				for _, w := range sessionWindows {
+					if w == windowName {
+						if killErr := tmux.KillWindow(sessionName, windowName); killErr != nil {
+							slog.Debug("could not kill tmux window", "window", windowName, "err", killErr)
+						}
+						break
+					}
+				}
+			}
+
+			// Delete branch if it has a remote tracking ref.
+			branchDeleted := false
+			if !keepBranches {
+				hasRemote, remoteErr := git.HasRemoteTracking(mainRepo, e.Branch)
+				if remoteErr != nil {
+					slog.Debug("could not check remote tracking", "branch", e.Branch, "err", remoteErr)
+				}
+				if hasRemote {
+					if delErr := exec.Command("git", "-C", mainRepo, "branch", "-d", e.Branch).Run(); delErr != nil {
+						slog.Debug("could not delete branch", "branch", e.Branch, "err", delErr)
+					} else {
+						branchDeleted = true
+					}
+				}
+			}
+
+			reason := ""
+			if branchDeleted {
+				reason = "branch deleted"
+			}
+			results = append(results, cleanupResult{
+				Repo:   repoName,
+				Branch: e.Branch,
+				Dir:    e.Dir,
+				Action: "removed",
+				Reason: reason,
+			})
+		} else {
+			results = append(results, cleanupResult{
+				Repo:   repoName,
+				Branch: e.Branch,
+				Dir:    e.Dir,
+				Action: "would-remove",
+			})
+		}
+	}
+
+	// Prune stale worktree entries (skip in dry-run — nothing was removed).
+	if !dryRun {
+		if pruneErr := exec.Command("git", "-C", mainRepo, "worktree", "prune").Run(); pruneErr != nil {
+			slog.Debug("git worktree prune failed", "repo", mainRepo, "err", pruneErr)
+		}
+	}
+
+	return results, nil
+}
+
+func runWorktreeCleanupMulti(dryRun, force, keepBranches, asJSON bool) error {
+	sessionName, err := tmux.CurrentSessionName()
+	if err != nil {
+		return fmt.Errorf("getting tmux session name: %w", err)
+	}
+
+	codeContainer := filepath.Join(cfg.CodeRoot, sessionName)
+	if _, statErr := os.Stat(codeContainer); statErr != nil {
+		return fmt.Errorf("code container not found for session %q: %s", sessionName, codeContainer)
+	}
+
+	lanes, err := scanner.ScanSourceSet(model.SourceSet{codeContainer})
+	if err != nil {
+		return fmt.Errorf("scanning %s: %w", codeContainer, err)
+	}
+
+	// Collect unique main repos from the lanes (skip linked worktrees — those
+	// are enumerated via git.ListWorktrees on each main repo).
+	seen := make(map[string]bool)
+	var repos []string
+	for _, lane := range lanes {
+		isWT, wtErr := git.IsWorktree(lane.Dir)
+		if wtErr != nil {
+			slog.Debug("could not determine worktree status", "dir", lane.Dir, "err", wtErr)
+			continue
+		}
+		if isWT {
+			continue
+		}
+		if !seen[lane.Dir] {
+			seen[lane.Dir] = true
+			repos = append(repos, lane.Dir)
+		}
+	}
+
+	var allResults []cleanupResult
+	for _, repoDir := range repos {
+		results, repoErr := cleanupRepo(repoDir, dryRun, force, keepBranches)
+		if repoErr != nil {
+			return repoErr
+		}
+		allResults = append(allResults, results...)
+	}
+
+	return printCleanupResults(allResults, asJSON)
+}
+
+func printCleanupResults(results []cleanupResult, asJSON bool) error {
+	if asJSON {
+		b, err := json.Marshal(results)
+		if err != nil {
+			return fmt.Errorf("marshalling results: %w", err)
+		}
+		fmt.Println(string(b))
+		return nil
+	}
+
+	if len(results) == 0 {
+		fmt.Println("no merged worktrees found")
+		return nil
+	}
+
+	removed, skipped, wouldRemove := 0, 0, 0
+	for _, r := range results {
+		switch r.Action {
+		case "removed":
+			removed++
+			msg := fmt.Sprintf("%s (%s): removed %s", r.Repo, filepath.Base(r.Dir), r.Branch)
+			if r.Reason != "" {
+				msg += " — " + r.Reason
+			}
+			fmt.Println(msg)
+		case "would-remove":
+			wouldRemove++
+			fmt.Printf("%s (%s): would remove %s\n", r.Repo, filepath.Base(r.Dir), r.Branch)
+		case "skipped":
+			skipped++
+			fmt.Printf("%s (%s): skipped %s — %s\n", r.Repo, filepath.Base(r.Dir), r.Branch, r.Reason)
+		}
+	}
+
+	fmt.Println("---")
+	var parts []string
+	if removed > 0 {
+		parts = append(parts, fmt.Sprintf("removed %d", removed))
+	}
+	if wouldRemove > 0 {
+		parts = append(parts, fmt.Sprintf("would remove %d (dry-run)", wouldRemove))
+	}
+	if skipped > 0 {
+		parts = append(parts, fmt.Sprintf("skipped %d", skipped))
+	}
+	fmt.Println(strings.Join(parts, ", "))
 
 	return nil
 }
