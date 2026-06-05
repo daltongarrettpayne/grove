@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -279,9 +280,26 @@ func runWindowDelete(name string) error {
 	if err != nil {
 		return fmt.Errorf("getting current session name: %w", err)
 	}
+
+	windows, err := tmux.ListWindows(sessionName)
+	if err != nil {
+		return fmt.Errorf("listing windows in session %q: %w", sessionName, err)
+	}
+	found := false
+	for _, w := range windows {
+		if w == name {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("window %q not found in session %q\nAvailable windows:\n  %s",
+			name, sessionName, strings.Join(windows, "\n  "))
+	}
+
 	if err := tmux.KillWindow(sessionName, name); err != nil {
 		return fmt.Errorf("killing window %q: %w", name, err)
 	}
-	fmt.Printf("deleted window %s\n", name)
+	fmt.Printf("deleted window %q\n", name)
 	return nil
 }
