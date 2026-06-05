@@ -61,33 +61,36 @@ found, the home directory is missing, or tmux fails.`,
 	},
 }
 
+var sessionListJSON bool
+
 var sessionListCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List available contexts as JSON",
-	Long: `Scan the vault tiers and emit all available contexts as a JSON array.
+	Short: "List all contexts in the vault",
+	Long: `Scan the vault tiers and print all available contexts.
 
 Preconditions:
   - GROVE_HOME_ROOT must contain 01-Projects/ and/or 02-Areas/ subdirectories.
 
-Output: a JSON array where each element has:
-  - "name":       the context directory name
-  - "home_dir":   absolute path to the vault directory
-  - "lanes":      array of lane objects (kind, repo, branch, dir)
+Human output (default): an aligned table with columns:
+  name     — context directory name
+  tier     — "project" (01-Projects) or "area" (02-Areas)
+  lanes    — number of git working trees in the code directory
+  session  — whether a live tmux session exists for this context
 
-Contexts from both 01-Projects/ and 02-Areas/ are included. Code lanes are
-populated only when a matching directory exists under GROVE_CODE_ROOT.
+JSON output (--json): a JSON array where each element has:
+  name, tier, lane_count, session, home_dir, lanes[]
 
-The output is designed to be consumed by scripts, fzf, or other tooling.`,
-	Example: `  # List all contexts:
+Contexts from both 01-Projects/ and 02-Areas/ are included.`,
+	Example: `  # Human-readable table:
   grove session list
 
-  # Pretty-print with jq:
-  grove session list | jq '.[].name'
+  # Machine-readable JSON:
+  grove session list --json
 
-  # Find contexts that have code lanes:
-  grove session list | jq '[.[] | select(.lanes | length > 0)]'`,
+  # Find live sessions with jq:
+  grove session list --json | jq '[.[] | select(.session == true)]'`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return runSessionList()
+		return runSessionList(sessionListJSON)
 	},
 }
 
@@ -118,6 +121,7 @@ Exits 0 on success. Exits non-zero if the session is not found or kill fails.`,
 }
 
 func init() {
+	sessionListCmd.Flags().BoolVar(&sessionListJSON, "json", false, "emit output as a JSON array")
 	sessionCmd.AddCommand(sessionOpenCmd)
 	sessionCmd.AddCommand(sessionListCmd)
 	sessionCmd.AddCommand(sessionDeleteCmd)
@@ -224,28 +228,43 @@ func runSessionOpen(name string) error {
 	return tmux.AttachOrSwitch(name)
 }
 
-func runSessionList() error {
-	// Vault tiers whose subdirectories are workspace contexts, per the design doc.
-	tiers := []string{"01-Projects", "02-Areas"}
+type sessionListEntry struct {
+	Name      string       `json:"name"`
+	Tier      string       `json:"tier"`
+	LaneCount int          `json:"lane_count"`
+	Session   bool         `json:"session"`
+	HomeDir   string       `json:"home_dir"`
+	Lanes     []model.Lane `json:"lanes"`
+}
 
-	var contexts []model.Context
+func runSessionList(asJSON bool) error {
+	tiers := []struct {
+		dir   string
+		label string
+	}{
+		{"01-Projects", "project"},
+		{"02-Areas", "area"},
+	}
+
+	var entries []sessionListEntry
+	maxNameLen := len("name")
+
 	for _, tier := range tiers {
-		tierDir := filepath.Join(cfg.HomeRoot, tier)
-		entries, err := os.ReadDir(tierDir)
+		tierDir := filepath.Join(cfg.HomeRoot, tier.dir)
+		dirEntries, err := os.ReadDir(tierDir)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
 			return fmt.Errorf("reading vault tier %s: %w", tierDir, err)
 		}
-		for _, e := range entries {
+		for _, e := range dirEntries {
 			if !e.IsDir() || isHiddenName(e.Name()) {
 				continue
 			}
 			name := e.Name()
 			homeDir := filepath.Join(tierDir, name)
 
-			// lanes is initialised as empty (not nil) so JSON encodes [] not null.
 			lanes := make([]model.Lane, 0)
 			codeContainer := filepath.Join(cfg.CodeRoot, name)
 			if _, statErr := os.Stat(codeContainer); statErr == nil {
@@ -253,23 +272,69 @@ func runSessionList() error {
 				if scanErr != nil {
 					return fmt.Errorf("scanning %s: %w", codeContainer, scanErr)
 				}
-				lanes = scanned
+				lanes = append(lanes, scanned...)
 			}
 
-			contexts = append(contexts, model.Context{
+			live, sessErr := tmux.HasSession(name)
+			if sessErr != nil {
+				slog.Debug("tmux.HasSession error", "name", name, "err", sessErr)
+				live = false
+			}
+
+			entries = append(entries, sessionListEntry{
 				Name:      name,
+				Tier:      tier.label,
+				LaneCount: len(lanes),
+				Session:   live,
 				HomeDir:   homeDir,
-				SourceSet: model.SourceSet{codeContainer},
 				Lanes:     lanes,
 			})
+			if len(name) > maxNameLen {
+				maxNameLen = len(name)
+			}
 		}
 	}
 
-	out, err := json.MarshalIndent(contexts, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshalling contexts: %w", err)
+	if asJSON {
+		// Rebuild as []model.Context for backwards-compatible JSON shape.
+		contexts := make([]model.Context, len(entries))
+		for i, e := range entries {
+			contexts[i] = model.Context{
+				Name:      e.Name,
+				HomeDir:   e.HomeDir,
+				SourceSet: model.SourceSet{filepath.Join(cfg.CodeRoot, e.Name)},
+				Lanes:     e.Lanes,
+			}
+		}
+		out, err := json.MarshalIndent(entries, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshalling contexts: %w", err)
+		}
+		fmt.Println(string(out))
+		return nil
 	}
-	fmt.Println(string(out))
+
+	// Human-readable aligned table.
+	colName := maxNameLen
+	colTier := len("project")
+	colLanes := len("lanes")
+	colSess := len("session")
+
+	fmt.Printf("%-*s  %-*s  %-*s  %-*s\n", colName, "name", colTier, "tier", colLanes, "lanes", colSess, "session")
+	fmt.Printf("%-*s  %-*s  %-*s  %-*s\n",
+		colName, dashes(colName),
+		colTier, dashes(colTier),
+		colLanes, dashes(colLanes),
+		colSess, dashes(colSess),
+	)
+	for _, e := range entries {
+		fmt.Printf("%-*s  %-*s  %-*d  %-*s\n",
+			colName, e.Name,
+			colTier, e.Tier,
+			colLanes, e.LaneCount,
+			colSess, boolStr(e.Session),
+		)
+	}
 	return nil
 }
 

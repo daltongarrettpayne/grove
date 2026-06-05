@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -346,12 +347,29 @@ func runProjectArchive(name string, killSession bool) error {
 	}
 
 	// Step 5: move the vault directory.
-	slog.Info("archiving project", "src", src, "dest", dest)
-	if err := os.Rename(src, dest); err != nil {
-		return fmt.Errorf("moving %s → %s: %w", src, dest, err)
+	if err := moveDir(src, dest); err != nil {
+		return fmt.Errorf("could not archive %q: %w", name, err)
 	}
-	fmt.Printf("archived %s\n         → %s\n", src, dest)
+	fmt.Printf("archived %s\n      -> %s\n", src, dest)
 
+	return nil
+}
+
+// moveDir moves src to dest. os.Rename is tried first; if it fails with a
+// cross-device error (src and dest on different filesystems, common in Docker)
+// it falls back to the system mv command which handles the copy+delete itself.
+func moveDir(src, dest string) error {
+	if err := os.Rename(src, dest); err == nil {
+		return nil
+	}
+	out, err := exec.Command("mv", src, dest).CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			return err
+		}
+		return fmt.Errorf("%s", msg)
+	}
 	return nil
 }
 
