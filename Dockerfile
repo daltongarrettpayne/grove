@@ -5,12 +5,8 @@
 # That is the portability thesis made executable.
 #
 # Usage:
-#   docker build -t grove-dev .
-#   docker run -it --rm grove-dev
-#   # Inside the container:
-#   tmux new-session -s dev
-#   grove session list
-#   grove window          # (once implemented — will open fzf inside tmux)
+#   make dev              # build image and drop into a live grove session
+#   make dev-fast         # skip rebuild, reuse existing image
 
 FROM golang:1.25-bookworm
 
@@ -36,6 +32,8 @@ RUN go mod download
 # Copy source and build.
 COPY . .
 RUN go build -o /usr/local/bin/grove ./cmd/grove
+COPY scripts/dev-entrypoint.sh /usr/local/bin/dev-entrypoint
+RUN chmod +x /usr/local/bin/dev-entrypoint
 
 # Generate the fixture world under $HOME so the layout mirrors the real system:
 # ~/code/ and ~/vault/ rather than a separate /fixtures/ directory.
@@ -49,6 +47,7 @@ ENV GROVE_HOME_ROOT=/root/vault
 # socket that might exist on the host if volumes are mounted.
 ENV GROVE_TMUX_SOCKET=/tmp/grove-dev.sock
 
-# Drop into bash. Start tmux yourself: `tmux new-session -s dev`
-# This lets you attach/detach naturally inside the container.
-CMD ["bash"]
+# Open the coding-project-big fixture context and attach.
+# Drops you into a live grove tmux session with all fixture repos as windows.
+# Exit tmux to leave the container.
+CMD ["dev-entrypoint"]
