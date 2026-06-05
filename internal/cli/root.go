@@ -20,6 +20,30 @@ var (
 var rootCmd = &cobra.Command{
 	Use:   "grove",
 	Short: "Weave your knowledge tree and code tree into tmux sessions",
+	Long: `Grove maps your on-disk structure to tmux sessions deterministically.
+
+A context is a tmux session. Its lanes are windows. Lane 0 is always "home".
+Every other lane is a git working tree identified by (repo, branch). The session
+is a pure function of disk state — stateless, idempotent, and reconstructible.
+
+Required env vars:
+  GROVE_CODE_ROOT   root directory scanned for code repos (default: ~/code)
+  GROVE_HOME_ROOT   root of the knowledge/vault tree (default: ~)
+
+Grove scans $GROVE_HOME_ROOT/01-Projects/ and $GROVE_HOME_ROOT/02-Areas/ for
+context directories. If a directory named <ctx> exists under $GROVE_CODE_ROOT,
+its working trees become lanes in that context's session.`,
+	Example: `  # Open a session for the "grove" context:
+  grove session open grove
+
+  # List all contexts as JSON:
+  grove session list
+
+  # Open the window picker inside a session:
+  grove window pick
+
+  # Audit your workspace for convention violations:
+  grove doctor`,
 	// SilenceUsage prevents cobra from printing usage on every error —
 	// usage is only relevant for wrong flags, not runtime errors.
 	SilenceUsage: true,

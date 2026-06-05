@@ -29,8 +29,15 @@ var (
 var doctorCmd = &cobra.Command{
 	Use:   "doctor",
 	Short: "Audit vault and code directories for convention violations and drift",
-	Long: `doctor scans the vault and code root for:
+	Long: `Scan the vault and code root for convention violations and drift, then report findings.
 
+Preconditions:
+  - GROVE_HOME_ROOT must be set or default to ~ (doctor checks whether it has the
+    expected tier directories).
+  - GROVE_CODE_ROOT is scanned two levels deep: CodeRoot/container/repo-or-worktree.
+  - orphaned-session check runs only when inside a tmux session (TMUX must be set).
+
+Check categories:
   vault-present      HomeRoot has expected tier directories (01-Projects, 02-Areas)
   archived-context   archived vault contexts that still have a live tmux session
   repo-naming        repo directories that are not kebab-case
@@ -40,7 +47,21 @@ var doctorCmd = &cobra.Command{
   detached-head      working trees with a detached HEAD (grove cannot identify as a lane)
   orphaned-session   tmux sessions with no matching vault context (only when in tmux)
 
-Exit codes: 0 = clean, 1 = violations found, non-zero error = runtime failure.`,
+Default output (human-readable): findings grouped by check category. If all checks
+pass, prints "no issues found".
+
+Exit codes: 0 = clean, 1 = one or more violations found, 2+ = runtime failure.`,
+	Example: `  # Run all checks (human-readable output):
+  grove doctor
+
+  # Emit findings as JSON (suitable for scripting):
+  grove doctor --json
+
+  # Run only the stale-worktree check:
+  grove doctor --check stale-worktree
+
+  # Use in CI — non-zero exit if any violations found:
+  grove doctor || exit 1`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDoctor(doctorJSONFlag, doctorCheckFlag)
 	},
