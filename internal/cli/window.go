@@ -280,7 +280,12 @@ func runWindowPicker() error {
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-		return cmd.Run()
+		// Ignore the display-popup exit code. When the user selects a window,
+		// select-window closes the popup mid-execution, which kills the inner grove
+		// process and causes display-popup to exit non-zero. That is the successful
+		// case. Any genuine error was already shown inside the popup terminal.
+		_ = cmd.Run()
+		return nil
 	}
 
 	chosen, err := picker.NewFzf(cfg.Picker).Select(names)
