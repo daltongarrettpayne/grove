@@ -6,11 +6,15 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/daltongarrettpayne/grove/internal/model"
+	"github.com/daltongarrettpayne/grove/internal/picker"
 	"github.com/daltongarrettpayne/grove/internal/scanner"
 	"github.com/daltongarrettpayne/grove/internal/tmux"
 )
@@ -120,11 +124,47 @@ Exits 0 on success. Exits non-zero if the session is not found or kill fails.`,
 	},
 }
 
+var sessionPickCmd = &cobra.Command{
+	Use:   "pick",
+	Short: "Open the fzf session picker and switch to the selected context",
+	Long: `Open an interactive picker over all vault contexts, then open or switch to
+the chosen grove session.
+
+Preconditions:
+  - The picker binary (default: fzf) must be on PATH. Override with GROVE_PICKER.
+  - GROVE_HOME_ROOT must contain 01-Projects/ and/or 02-Areas/ subdirectories.
+
+When invoked inside tmux (and not already inside a popup), grove re-invokes
+itself inside a tmux display-popup so the picker floats over the current window.
+
+What it does:
+  1. Scans 01-Projects/ and 02-Areas/ under GROVE_HOME_ROOT for context directories.
+  2. Builds a row per context: name, tier, lane count, live-session indicator.
+  3. Passes the rows to the picker binary via stdin.
+  4. On selection, calls "grove session open <name>" to create/attach the session.
+  5. On cancel (Esc / Ctrl-C), exits silently with code 0.
+
+This command is designed to be bound to a tmux key in your tmux.conf:
+  bind-key S run-shell "grove session pick"`,
+	Example: `  # Open the session picker (inside tmux — opens as a floating popup):
+  grove session pick
+
+  # Open the picker outside tmux (inline fzf):
+  GROVE_HOME_ROOT=~/vault grove session pick
+
+  # Typical tmux.conf binding:
+  bind-key S run-shell "grove session pick"`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runSessionPick()
+	},
+}
+
 func init() {
 	sessionListCmd.Flags().BoolVar(&sessionListJSON, "json", false, "emit output as a JSON array")
 	sessionCmd.AddCommand(sessionOpenCmd)
 	sessionCmd.AddCommand(sessionListCmd)
 	sessionCmd.AddCommand(sessionDeleteCmd)
+	sessionCmd.AddCommand(sessionPickCmd)
 	rootCmd.AddCommand(sessionCmd)
 }
 
@@ -347,6 +387,162 @@ func runSessionList(asJSON bool) error {
 		)
 	}
 	return nil
+}
+
+// buildSessionPickRows scans vault tiers and returns fzf-ready rows plus the
+// maximum context name length (used to size the popup).
+//
+// Row format (space-aligned):
+//
+//	coding-project-big    project  5 lanes  *
+//	coding-project-small  project  2 lanes
+//	health                area     0 lanes
+//
+// The trailing "*" appears when a live tmux session with that name exists.
+func buildSessionPickRows() (rows []string, maxNameLen int, err error) {
+	tiers := []struct {
+		dir   string
+		label string
+	}{
+		{"01-Projects", "project"},
+		{"02-Areas", "area"},
+	}
+
+	type rowEntry struct {
+		name      string
+		tier      string
+		laneCount int
+		live      bool
+	}
+
+	var entries []rowEntry
+	maxNameLen = 0
+
+	for _, tier := range tiers {
+		tierDir := filepath.Join(cfg.HomeRoot, tier.dir)
+		dirEntries, readErr := os.ReadDir(tierDir)
+		if readErr != nil {
+			if errors.Is(readErr, os.ErrNotExist) {
+				continue
+			}
+			return nil, 0, fmt.Errorf("reading vault tier %s: %w", tierDir, readErr)
+		}
+		for _, e := range dirEntries {
+			if !e.IsDir() || isHiddenName(e.Name()) {
+				continue
+			}
+			name := e.Name()
+
+			laneCount := 0
+			codeContainer := filepath.Join(cfg.CodeRoot, name)
+			if _, statErr := os.Stat(codeContainer); statErr == nil {
+				scanned, scanErr := scanner.ScanSourceSet(model.SourceSet{codeContainer})
+				if scanErr != nil {
+					return nil, 0, fmt.Errorf("scanning %s: %w", codeContainer, scanErr)
+				}
+				laneCount = len(scanned)
+			}
+
+			live, sessErr := tmux.HasSession(name)
+			if sessErr != nil {
+				slog.Debug("tmux.HasSession error", "name", name, "err", sessErr)
+				live = false
+			}
+
+			entries = append(entries, rowEntry{
+				name:      name,
+				tier:      tier.label,
+				laneCount: laneCount,
+				live:      live,
+			})
+			if len(name) > maxNameLen {
+				maxNameLen = len(name)
+			}
+		}
+	}
+
+	rows = make([]string, 0, len(entries))
+	for _, e := range entries {
+		laneWord := "lanes"
+		if e.laneCount == 1 {
+			laneWord = "lane"
+		}
+		// Format: name (padded) + "  " + tier (padded to 7) + "  " + N lanes + optional "  *"
+		row := fmt.Sprintf("%-*s  %-7s  %d %s",
+			maxNameLen, e.name,
+			e.tier,
+			e.laneCount, laneWord,
+		)
+		if e.live {
+			row += "  *"
+		}
+		rows = append(rows, row)
+	}
+	return rows, maxNameLen, nil
+}
+
+func runSessionPick() error {
+	// When inside tmux and not already running inside a popup, re-invoke self
+	// as a tmux display-popup so the picker floats over the current window.
+	if os.Getenv("TMUX") != "" && os.Getenv("GROVE_POPUP_ACTIVE") != "1" {
+		// We need the row count to size the popup, so we build rows twice:
+		// once here to compute dimensions, then again inside the popup.
+		rows, maxNameLen, err := buildSessionPickRows()
+		if err != nil {
+			return err
+		}
+
+		// Width: max name len + tier (7) + lane count col + padding + borders.
+		// A typical row looks like: "<name>  project  5 lanes  *"
+		// That's maxNameLen + 2 + 7 + 2 + ~10 chars = maxNameLen + ~21.
+		// Add 6 for fzf chrome.
+		width := maxNameLen + 27
+		if width < 40 {
+			width = 40
+		}
+		height := len(rows) + 6
+		if height > 30 {
+			height = 30
+		}
+		if height < 12 {
+			height = 12
+		}
+
+		self, selfErr := os.Executable()
+		if selfErr != nil {
+			return fmt.Errorf("resolving executable path: %w", selfErr)
+		}
+		cmd := exec.Command("tmux", "display-popup",
+			"-w", strconv.Itoa(width),
+			"-h", strconv.Itoa(height+2),
+			"-e", "GROVE_POPUP_ACTIVE=1",
+			"-e", "GROVE_HOME_ROOT="+cfg.HomeRoot,
+			"-e", "GROVE_CODE_ROOT="+cfg.CodeRoot,
+			"-E", self+" session pick",
+		)
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		return cmd.Run()
+	}
+
+	// Inside popup (or outside tmux): build rows and run the picker.
+	rows, _, err := buildSessionPickRows()
+	if err != nil {
+		return err
+	}
+
+	chosen, err := picker.NewFzf(cfg.Picker).Select(rows)
+	if err != nil {
+		if errors.Is(err, picker.ErrCancelled) {
+			return nil
+		}
+		return fmt.Errorf("picker: %w", err)
+	}
+
+	// The first whitespace-delimited token in the chosen row is the context name.
+	name := strings.Fields(chosen)[0]
+	return runSessionOpen(name)
 }
 
 // isHiddenName reports whether a directory name starts with a dot.
