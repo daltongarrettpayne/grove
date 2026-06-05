@@ -26,9 +26,9 @@ lint:
 clean:
 	rm -rf $(BIN_DIR)/
 
-## fixtures: generate the deterministic test world at /tmp/grove-fixtures
-fixtures:
-	go run ./test/fixtures/gen
+## fixtures: build grove then generate the deterministic test world at /tmp/grove-fixtures
+fixtures: build
+	go run ./test/fixtures/gen -grove $(BIN_DIR)/$(BINARY)
 
 ## docker-build: build the dev/test clean-room image
 docker-build:
