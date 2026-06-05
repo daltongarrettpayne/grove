@@ -37,12 +37,13 @@ RUN go mod download
 COPY . .
 RUN go build -o /usr/local/bin/grove ./cmd/grove
 
-# Generate the fixture world. Tests and manual exploration both use this.
-RUN go run ./test/fixtures/gen --out /fixtures
+# Generate the fixture world under $HOME so the layout mirrors the real system:
+# ~/code/ and ~/vault/ rather than a separate /fixtures/ directory.
+RUN go run ./test/fixtures/gen --out /root
 
 # Tell grove where to find code and vault without any user config.
-ENV GROVE_CODE_ROOT=/fixtures/code
-ENV GROVE_HOME_ROOT=/fixtures/vault
+ENV GROVE_CODE_ROOT=/root/code
+ENV GROVE_HOME_ROOT=/root/vault
 
 # Use a private tmux socket so the container's tmux is isolated from any
 # socket that might exist on the host if volumes are mounted.
