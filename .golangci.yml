@@ -19,10 +19,6 @@ formatters:
         - github.com/daltongarrettpayne/grove
 
 issues:
-  exclude-rules:
-    # test files: errcheck false positives on t.Log, etc.
-    - path: _test\.go
-      linters: [errcheck]
   max-issues-per-linter: 50
   max-same-issues: 10
 
