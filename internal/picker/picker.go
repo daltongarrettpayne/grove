@@ -22,19 +22,22 @@ type Backend interface {
 
 // Fzf is the default Backend, backed by the fzf binary.
 type Fzf struct {
-	Binary string // name or absolute path of the fzf binary
+	Binary string   // name or absolute path of the fzf binary
+	Args   []string // additional fzf flags appended after any defaults
 }
 
 // NewFzf returns a Fzf backend. If binary is empty, "fzf" is used.
-func NewFzf(binary string) *Fzf {
+// Any extra args are appended to the fzf command line on every Select call.
+func NewFzf(binary string, args ...string) *Fzf {
 	if binary == "" {
 		binary = "fzf"
 	}
-	return &Fzf{Binary: binary}
+	return &Fzf{Binary: binary, Args: args}
 }
 
 func (f *Fzf) Select(rows []string) (string, error) {
-	cmd := exec.Command(f.Binary)
+	cmdArgs := append([]string{}, f.Args...)
+	cmd := exec.Command(f.Binary, cmdArgs...)
 	cmd.Stdin = strings.NewReader(strings.Join(rows, "\n"))
 
 	out, err := cmd.Output()

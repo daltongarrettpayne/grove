@@ -8,8 +8,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/spf13/cobra"
 
@@ -399,25 +401,27 @@ func runSessionList(asJSON bool) error {
 //	health                area     0 lanes
 //
 // The trailing "*" appears when a live tmux session with that name exists.
+// Lane counting and session checks are run concurrently across all contexts.
 func buildSessionPickRows() (rows []string, maxNameLen int, err error) {
 	tiers := []struct {
 		dir   string
 		label string
+		tier  int // ordering index: 0 = project, 1 = area
 	}{
-		{"01-Projects", "project"},
-		{"02-Areas", "area"},
+		{"01-Projects", "project", 0},
+		{"02-Areas", "area", 1},
 	}
 
 	type rowEntry struct {
 		name      string
-		tier      string
+		tierLabel string
+		tierIdx   int
 		laneCount int
 		live      bool
 	}
 
-	var entries []rowEntry
-	maxNameLen = 0
-
+	// First pass: enumerate directories synchronously (fast, no git calls).
+	var potentialEntries []rowEntry
 	for _, tier := range tiers {
 		tierDir := filepath.Join(cfg.HomeRoot, tier.dir)
 		dirEntries, readErr := os.ReadDir(tierDir)
@@ -431,38 +435,73 @@ func buildSessionPickRows() (rows []string, maxNameLen int, err error) {
 			if !e.IsDir() || isHiddenName(e.Name()) {
 				continue
 			}
-			name := e.Name()
-
-			laneCount := 0
-			codeContainer := filepath.Join(cfg.CodeRoot, name)
-			if _, statErr := os.Stat(codeContainer); statErr == nil {
-				scanned, scanErr := scanner.ScanSourceSet(model.SourceSet{codeContainer})
-				if scanErr != nil {
-					return nil, 0, fmt.Errorf("scanning %s: %w", codeContainer, scanErr)
-				}
-				laneCount = len(scanned)
-			}
-
-			live, sessErr := tmux.HasSession(name)
-			if sessErr != nil {
-				slog.Debug("tmux.HasSession error", "name", name, "err", sessErr)
-				live = false
-			}
-
-			entries = append(entries, rowEntry{
-				name:      name,
-				tier:      tier.label,
-				laneCount: laneCount,
-				live:      live,
+			potentialEntries = append(potentialEntries, rowEntry{
+				name:      e.Name(),
+				tierLabel: tier.label,
+				tierIdx:   tier.tier,
 			})
-			if len(name) > maxNameLen {
-				maxNameLen = len(name)
-			}
 		}
 	}
 
+	// Second pass: fan out scanner + HasSession calls concurrently.
+	type result struct {
+		entry rowEntry
+		err   error
+	}
+	ch := make(chan result, len(potentialEntries))
+	var wg sync.WaitGroup
+	for _, e := range potentialEntries {
+		wg.Add(1)
+		go func(e rowEntry) {
+			defer wg.Done()
+			codeContainer := filepath.Join(cfg.CodeRoot, e.name)
+			if _, statErr := os.Stat(codeContainer); statErr == nil {
+				scanned, scanErr := scanner.ScanSourceSet(model.SourceSet{codeContainer})
+				if scanErr != nil {
+					ch <- result{err: fmt.Errorf("scanning %s: %w", codeContainer, scanErr)}
+					return
+				}
+				e.laneCount = len(scanned)
+			}
+
+			live, sessErr := tmux.HasSession(e.name)
+			if sessErr != nil {
+				slog.Debug("tmux.HasSession error", "name", e.name, "err", sessErr)
+			}
+			e.live = live
+			ch <- result{entry: e}
+		}(e)
+	}
+
+	// Close channel once all goroutines finish.
+	go func() {
+		wg.Wait()
+		close(ch)
+	}()
+
+	// Collect results, propagating any scan error.
+	var entries []rowEntry
+	for r := range ch {
+		if r.err != nil {
+			return nil, 0, r.err
+		}
+		entries = append(entries, r.entry)
+	}
+
+	// Sort by (tierIdx, name) to maintain stable, deterministic order.
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].tierIdx != entries[j].tierIdx {
+			return entries[i].tierIdx < entries[j].tierIdx
+		}
+		return entries[i].name < entries[j].name
+	})
+
+	// Build rows and compute max name length in a single pass.
 	rows = make([]string, 0, len(entries))
 	for _, e := range entries {
+		if len(e.name) > maxNameLen {
+			maxNameLen = len(e.name)
+		}
 		laneWord := "lanes"
 		if e.laneCount == 1 {
 			laneWord = "lane"
@@ -472,7 +511,7 @@ func buildSessionPickRows() (rows []string, maxNameLen int, err error) {
 		// name even when it contains spaces (e.g. "AI Eng Job Hunt").
 		row := fmt.Sprintf("%s\t%-7s  %d %s",
 			e.name,
-			e.tier,
+			e.tierLabel,
 			e.laneCount, laneWord,
 		)
 		if e.live {
@@ -531,19 +570,33 @@ func runSessionPick() error {
 	// Inside popup (or outside tmux): build rows and run the picker.
 	rows, _, err := buildSessionPickRows()
 	if err != nil {
+		slog.Error("session pick: building rows", "err", err)
 		return err
 	}
 
-	chosen, err := picker.NewFzf(cfg.Picker).Select(rows)
+	slog.Debug("session pick: presenting picker", "row_count", len(rows))
+
+	// Compact mode: show nothing until the user types, then display up to 4
+	// matching rows. The full list is always available by clearing the query.
+	compactArgs := []string{
+		"--height", "~4",
+		"--min-height", "0",
+		"--no-info",
+		"--reverse",
+	}
+	chosen, err := picker.NewFzf(cfg.Picker, compactArgs...).Select(rows)
 	if err != nil {
 		if errors.Is(err, picker.ErrCancelled) {
+			slog.Debug("session pick: cancelled")
 			return nil
 		}
+		slog.Error("session pick: picker error", "err", err)
 		return fmt.Errorf("picker: %w", err)
 	}
 
 	// Name is the first tab-delimited field — safe for names containing spaces.
 	name := strings.SplitN(chosen, "\t", 2)[0]
+	slog.Info("session pick: opening session", "name", name)
 	return runSessionOpen(name)
 }
 
