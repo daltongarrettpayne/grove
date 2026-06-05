@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -238,6 +239,39 @@ func runWindowPicker() error {
 	rows, _, err := buildWindowRows(sessionName)
 	if err != nil {
 		return err
+	}
+
+	// When inside tmux and not already in a popup, re-invoke self inside a
+	// tmux display-popup so the picker floats over the current window.
+	if os.Getenv("GROVE_POPUP_ACTIVE") != "1" {
+		maxRowLen := 0
+		for _, r := range rows {
+			if len(r) > maxRowLen {
+				maxRowLen = len(r)
+			}
+		}
+		width := maxRowLen + 6
+		height := len(rows) + 5
+		if height < 8 {
+			height = 8
+		}
+
+		self, err := os.Executable()
+		if err != nil {
+			return fmt.Errorf("resolving executable path: %w", err)
+		}
+		cmd := exec.Command("tmux", "display-popup",
+			"-w", strconv.Itoa(width),
+			"-h", strconv.Itoa(height),
+			"-e", "GROVE_POPUP_ACTIVE=1",
+			"-e", "GROVE_HOME_ROOT="+cfg.HomeRoot,
+			"-e", "GROVE_CODE_ROOT="+cfg.CodeRoot,
+			"-E", self+" window pick",
+		)
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		return cmd.Run()
 	}
 
 	chosen, err := picker.NewFzf(cfg.Picker).Select(rows)
