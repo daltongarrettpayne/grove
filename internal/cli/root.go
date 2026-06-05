@@ -66,6 +66,7 @@ its working trees become lanes in that context's session.`,
 			level = "debug"
 		}
 
+
 		// Open a JSON log file in ~/.local/share/grove/grove.log so every
 		// grove invocation is fully captured for debugging.
 		var fileOut *os.File
