@@ -2,7 +2,10 @@
 // The vocabulary here matches the design doc: context → lanes → views.
 package model
 
-import "strings"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // SourceSet is a list of container directories scanned for working trees.
 // One container = a single-project context; multiple = a cockpit.
@@ -18,13 +21,35 @@ const (
 	LanePointer                  // a pointer lane with no local checkout
 )
 
+// String returns the JSON-safe name for a LaneKind.
+func (k LaneKind) String() string {
+	switch k {
+	case LaneHome:
+		return "home"
+	case LaneClone:
+		return "clone"
+	case LaneWorktree:
+		return "worktree"
+	case LanePointer:
+		return "pointer"
+	default:
+		return "unknown"
+	}
+}
+
+// MarshalJSON emits the string name ("clone", "worktree", …) instead of the
+// integer iota value so the JSON output is self-describing.
+func (k LaneKind) MarshalJSON() ([]byte, error) {
+	return json.Marshal(k.String())
+}
+
 // Lane is a tmux window. Lane 0 is always the home lane (no repo or branch).
 type Lane struct {
-	Kind   LaneKind
-	Repo   string // repository name — same across all worktrees of a repo
-	Branch string // branch name; empty for the home lane
-	Dir    string // absolute path to the working tree on disk
-	IsHome bool
+	Kind   LaneKind `json:"kind"`
+	Repo   string   `json:"repo"`
+	Branch string   `json:"branch"`
+	Dir    string   `json:"dir"`
+	IsHome bool     `json:"-"`
 }
 
 // DisplayRow returns the picker-protocol row for this lane.
@@ -47,10 +72,10 @@ func (l Lane) DisplayRow(maxRepoLen int) string {
 // Context is a tmux session: a name, a home directory, and an ordered list
 // of lanes. Lane 0 is always the home lane.
 type Context struct {
-	Name      string
-	HomeDir   string
-	SourceSet SourceSet
-	Lanes     []Lane
+	Name      string    `json:"name"`
+	HomeDir   string    `json:"home_dir"`
+	SourceSet SourceSet `json:"-"`
+	Lanes     []Lane    `json:"lanes"`
 }
 
 // MaxRepoLen returns the length of the longest Repo name across all non-home

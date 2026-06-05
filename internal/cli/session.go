@@ -1,6 +1,17 @@
 package cli
 
-import "github.com/spf13/cobra"
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/spf13/cobra"
+
+	"github.com/daltongarrettpayne/grove/internal/model"
+	"github.com/daltongarrettpayne/grove/internal/scanner"
+)
 
 var sessionCmd = &cobra.Command{
 	Use:   "session",
@@ -36,6 +47,55 @@ func runSessionOpen(name string) error {
 }
 
 func runSessionList() error {
-	// TODO(build-order-2): scan vault and code root, emit JSON contexts
+	// Vault tiers whose subdirectories are workspace contexts, per the design doc.
+	tiers := []string{"01-Projects", "02-Areas"}
+
+	var contexts []model.Context
+	for _, tier := range tiers {
+		tierDir := filepath.Join(cfg.HomeRoot, tier)
+		entries, err := os.ReadDir(tierDir)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return fmt.Errorf("reading vault tier %s: %w", tierDir, err)
+		}
+		for _, e := range entries {
+			if !e.IsDir() || isHiddenName(e.Name()) {
+				continue
+			}
+			name := e.Name()
+			homeDir := filepath.Join(tierDir, name)
+
+			// lanes is initialised as empty (not nil) so JSON encodes [] not null.
+			lanes := make([]model.Lane, 0)
+			codeContainer := filepath.Join(cfg.CodeRoot, name)
+			if _, statErr := os.Stat(codeContainer); statErr == nil {
+				scanned, scanErr := scanner.ScanSourceSet(model.SourceSet{codeContainer})
+				if scanErr != nil {
+					return fmt.Errorf("scanning %s: %w", codeContainer, scanErr)
+				}
+				lanes = scanned
+			}
+
+			contexts = append(contexts, model.Context{
+				Name:      name,
+				HomeDir:   homeDir,
+				SourceSet: model.SourceSet{codeContainer},
+				Lanes:     lanes,
+			})
+		}
+	}
+
+	out, err := json.MarshalIndent(contexts, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshalling contexts: %w", err)
+	}
+	fmt.Println(string(out))
 	return nil
+}
+
+// isHiddenName reports whether a directory name starts with a dot.
+func isHiddenName(name string) bool {
+	return len(name) > 0 && name[0] == '.'
 }
