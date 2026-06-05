@@ -126,6 +126,8 @@ Exits 0 on success. Exits non-zero if the session is not found or kill fails.`,
 	},
 }
 
+var sessionPickEmitRows bool
+
 var sessionPickCmd = &cobra.Command{
 	Use:   "pick",
 	Short: "Open the fzf session picker and switch to the selected context",
@@ -157,12 +159,16 @@ This command is designed to be bound to a tmux key in your tmux.conf:
   # Typical tmux.conf binding:
   bind-key S run-shell "grove session pick"`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if sessionPickEmitRows {
+			return runSessionPickEmitRows()
+		}
 		return runSessionPick()
 	},
 }
 
 func init() {
 	sessionListCmd.Flags().BoolVar(&sessionListJSON, "json", false, "emit output as a JSON array")
+	sessionPickCmd.Flags().BoolVar(&sessionPickEmitRows, "emit-rows", false, "print picker rows to stdout and exit (used by fzf reload binding)")
 	sessionCmd.AddCommand(sessionOpenCmd)
 	sessionCmd.AddCommand(sessionListCmd)
 	sessionCmd.AddCommand(sessionDeleteCmd)
@@ -523,6 +529,18 @@ func buildSessionPickRows() (rows []string, maxNameLen int, err error) {
 	return rows, maxNameLen, nil
 }
 
+// runSessionPickEmitRows prints the tab-delimited picker rows to stdout and exits.
+// This is the fzf reload target: the picker calls "grove session pick --emit-rows"
+// on every keystroke so the list is only populated once the user starts typing.
+func runSessionPickEmitRows() error {
+	rows, _, err := buildSessionPickRows()
+	if err != nil {
+		return err
+	}
+	fmt.Println(strings.Join(rows, "\n"))
+	return nil
+}
+
 func runSessionPick() error {
 	// When inside tmux and not already running inside a popup, re-invoke self
 	// as a tmux display-popup so the picker floats over the current window.
@@ -565,24 +583,34 @@ func runSessionPick() error {
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-		return cmd.Run()
+		// Ignore the display-popup exit code. When the user selects a session,
+		// switch-client closes the popup mid-execution, which kills the inner grove
+		// process and causes display-popup to exit non-zero. That is the successful
+		// case. Any genuine error was already shown inside the popup terminal.
+		_ = cmd.Run()
+		return nil
 	}
 
-	// Inside popup (or outside tmux): build rows and run the picker.
-	rows, _, err := buildSessionPickRows()
-	if err != nil {
-		return err
+	// Inside popup (or outside tmux): start fzf with empty input and reload
+	// the full session list on each keystroke. This keeps the picker blank until
+	// the user starts typing, avoiding a wall of entries on open.
+	self, selfErr := os.Executable()
+	if selfErr != nil {
+		return fmt.Errorf("resolving executable path: %w", selfErr)
 	}
-
-	// Compact mode: show nothing until the user types, then display up to 4
-	// matching rows. The full list is always available by clearing the query.
-	compactArgs := []string{
-		"--height", "~4",
+	emitCmd := self + " session pick --emit-rows"
+	pickerArgs := []string{
+		"--height", "~12",
 		"--min-height", "0",
 		"--no-info",
 		"--reverse",
+		"--delimiter", "\t",
+		// Start with an empty list; reload from grove on every keystroke.
+		"--bind", "change:reload(" + emitCmd + ")+first",
+		// On open, show nothing — reload only fires on change, so initial state is empty.
+		"--bind", "start:reload(echo '')",
 	}
-	chosen, err := picker.NewFzf(cfg.Picker, compactArgs...).Select(rows)
+	chosen, err := picker.NewFzf(cfg.Picker, pickerArgs...).Select([]string{})
 	if err != nil {
 		if errors.Is(err, picker.ErrCancelled) {
 			return nil
