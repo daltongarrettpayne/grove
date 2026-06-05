@@ -199,9 +199,7 @@ func runProjectInit(name string, code, noGit bool, cloneURL string) error {
 			fmt.Printf("cloned   %s  →  %s\n", cloneURL, codeDir)
 		} else if !noGit {
 			slog.Info("initialising git repository", "path", codeDir)
-			initCmd := exec.Command("git", "init", codeDir)
-			initCmd.Stdout = os.Stdout
-			initCmd.Stderr = os.Stderr
+			initCmd := exec.Command("git", "init", "-b", "main", codeDir)
 			if err := initCmd.Run(); err != nil {
 				return fmt.Errorf("git init %s: %w", codeDir, err)
 			}
