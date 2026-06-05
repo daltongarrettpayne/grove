@@ -141,6 +141,15 @@ func SelectWindow(session, target string) error {
 	return nil
 }
 
+// KillSession kills the tmux session with the given name.
+func KillSession(name string) error {
+	_, err := run("kill-session", "-t", name)
+	if err != nil {
+		return fmt.Errorf("killing session %q: %w", name, err)
+	}
+	return nil
+}
+
 // ListWindows returns the names of all windows in the given session.
 func ListWindows(session string) ([]string, error) {
 	out, err := run("list-windows", "-t", session, "-F", "#{window_name}")
