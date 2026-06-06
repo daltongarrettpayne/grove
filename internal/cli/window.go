@@ -269,14 +269,18 @@ func runWindowPicker() error {
 		if err != nil {
 			return fmt.Errorf("resolving executable path: %w", err)
 		}
-		cmd := exec.Command("tmux", "display-popup",
+		popupArgs := append(tmux.SocketArgs(), "display-popup",
 			"-w", strconv.Itoa(width),
 			"-h", strconv.Itoa(height),
 			"-e", "GROVE_POPUP_ACTIVE=1",
 			"-e", "GROVE_HOME_ROOT="+cfg.HomeRoot,
 			"-e", "GROVE_CODE_ROOT="+cfg.CodeRoot,
-			"-E", self+" window pick",
 		)
+		if cfg.TmuxSocket != "" {
+			popupArgs = append(popupArgs, "-e", "GROVE_TMUX_SOCKET="+cfg.TmuxSocket)
+		}
+		popupArgs = append(popupArgs, "-E", self+" window pick")
+		cmd := exec.Command("tmux", popupArgs...)
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -311,10 +315,7 @@ func runWindowDeleteCurrent() error {
 		return fmt.Errorf("grove window delete must be run inside a tmux session")
 	}
 	// kill-window with no -t kills the current window.
-	cmd := exec.Command("tmux", "kill-window")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := tmux.KillCurrentWindow(); err != nil {
 		return fmt.Errorf("killing current window: %w", err)
 	}
 	fmt.Println("deleted current window")

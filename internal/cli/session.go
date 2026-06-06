@@ -572,14 +572,18 @@ func runSessionPick() error {
 		if selfErr != nil {
 			return fmt.Errorf("resolving executable path: %w", selfErr)
 		}
-		cmd := exec.Command("tmux", "display-popup",
+		popupArgs := append(tmux.SocketArgs(), "display-popup",
 			"-w", strconv.Itoa(width),
 			"-h", strconv.Itoa(height+2),
 			"-e", "GROVE_POPUP_ACTIVE=1",
 			"-e", "GROVE_HOME_ROOT="+cfg.HomeRoot,
 			"-e", "GROVE_CODE_ROOT="+cfg.CodeRoot,
-			"-E", self+" session pick",
 		)
+		if cfg.TmuxSocket != "" {
+			popupArgs = append(popupArgs, "-e", "GROVE_TMUX_SOCKET="+cfg.TmuxSocket)
+		}
+		popupArgs = append(popupArgs, "-E", self+" session pick")
+		cmd := exec.Command("tmux", popupArgs...)
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr

@@ -18,9 +18,33 @@ var (
 	ErrSessionExists = errors.New("session already exists")
 )
 
+// socket is the optional private tmux socket path. When set, every tmux
+// invocation targets it via `-S` so grove addresses the same server whether or
+// not it is run from inside a tmux session.
+var socket string
+
+// SetSocket configures the tmux socket grove talks to. Empty means use tmux's
+// default socket. Call once at startup from the loaded config.
+func SetSocket(s string) { socket = s }
+
+// SocketArgs returns the `-S <socket>` prefix when a private socket is
+// configured, or nil. Exposed so callers that build their own tmux command
+// line (e.g. display-popup) target the same server as the rest of grove.
+func SocketArgs() []string {
+	if socket == "" {
+		return nil
+	}
+	return []string{"-S", socket}
+}
+
+// command builds an *exec.Cmd for tmux with the socket prefix applied.
+func command(args ...string) *exec.Cmd {
+	return exec.Command("tmux", append(SocketArgs(), args...)...)
+}
+
 // run executes a tmux command and returns trimmed stdout.
 func run(args ...string) (string, error) {
-	cmd := exec.Command("tmux", args...)
+	cmd := command(args...)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("tmux %s: %w", strings.Join(args, " "), err)
@@ -30,7 +54,7 @@ func run(args ...string) (string, error) {
 
 // HasSession reports whether a tmux session with the given name is running.
 func HasSession(name string) (bool, error) {
-	err := exec.Command("tmux", "has-session", "-t", name).Run()
+	err := command("has-session", "-t", name).Run()
 	if err == nil {
 		return true, nil
 	}
@@ -101,7 +125,7 @@ func AttachOrSwitch(name string) error {
 		}
 		return nil
 	}
-	cmd := exec.Command("tmux", "attach-session", "-t", name)
+	cmd := command("attach-session", "-t", name)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -155,6 +179,15 @@ func KillSession(name string) error {
 	return nil
 }
 
+// KillCurrentWindow kills the window the calling pane belongs to (no -t).
+// Intended for use from inside a tmux session.
+func KillCurrentWindow() error {
+	if err := command("kill-window").Run(); err != nil {
+		return fmt.Errorf("tmux kill-window: %w", err)
+	}
+	return nil
+}
+
 // ListWindows returns the names of all windows in the given session.
 func ListWindows(session string) ([]string, error) {
 	out, err := run("list-windows", "-t", session, "-F", "#{window_name}")
@@ -171,7 +204,7 @@ func ListWindows(session string) ([]string, error) {
 // Returns nil if the window was not found (idempotent).
 func KillWindow(session, windowName string) error {
 	target := session + ":" + windowName
-	err := exec.Command("tmux", "kill-window", "-t", target).Run()
+	err := command("kill-window", "-t", target).Run()
 	if err == nil {
 		return nil
 	}
