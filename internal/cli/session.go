@@ -224,18 +224,20 @@ func runSessionOpen(name string) error {
 			return fmt.Errorf("home dir %s does not exist: %w", found.HomeDir, statErr)
 		}
 
-		// Step 4a: Create the session rooted at the home directory.
+		// Step 4a: Create the session rooted at the home directory, with the
+		// home window (lane 0) named at creation. Naming it here rather than
+		// renaming index 0 keeps this correct under any base-index setting.
 		slog.Info("creating session", "name", name, "home", found.HomeDir)
-		if err := tmux.NewSession(name, found.HomeDir); err != nil {
+		homeID, err := tmux.NewSession(name, found.HomeDir, "home")
+		if err != nil {
 			return fmt.Errorf("creating session %q: %w", name, err)
 		}
-
-		// Step 4b: Rename window 0 to "home".
-		if err := tmux.RenameWindow(name, "0", "home"); err != nil {
-			return fmt.Errorf("renaming home window in %q: %w", name, err)
+		// Pin the home window so shell prompt hooks don't rename it.
+		if err := tmux.PinWindow(homeID, "home"); err != nil {
+			return fmt.Errorf("pinning home window in %q: %w", name, err)
 		}
 
-		// Step 4c: Scan the code container if it exists.
+		// Step 4b: Scan the code container if it exists.
 		var lanes []model.Lane
 		codeContainer := filepath.Join(cfg.CodeRoot, name)
 		if _, statErr := os.Stat(codeContainer); statErr == nil {
@@ -257,8 +259,14 @@ func runSessionOpen(name string) error {
 		for _, lane := range lanes {
 			windowName := lane.DisplayRow(maxRepoLen)
 			slog.Debug("creating window", "session", name, "window", windowName, "dir", lane.Dir)
-			if err := tmux.NewWindow(name, windowName, lane.Dir); err != nil {
+			wid, err := tmux.NewWindow(name, windowName, lane.Dir)
+			if err != nil {
 				return fmt.Errorf("creating window %q in session %q: %w", windowName, name, err)
+			}
+			// Pin the lane window so shell prompt hooks don't rename it away
+			// from grove's "<repo>  ·  <branch>" grammar.
+			if err := tmux.PinWindow(wid, windowName); err != nil {
+				return fmt.Errorf("pinning window %q in session %q: %w", windowName, name, err)
 			}
 		}
 

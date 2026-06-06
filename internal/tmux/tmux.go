@@ -66,20 +66,40 @@ func HasSession(name string) (bool, error) {
 	return false, fmt.Errorf("tmux has-session: %w", err)
 }
 
-// NewSession creates a new detached session named `name` rooted at `dir`.
-func NewSession(name, dir string) error {
-	_, err := run("new-session", "-d", "-s", name, "-c", dir)
+// NewSession creates a new detached session named `name` rooted at `dir`, with
+// its initial window named `windowName`.
+//
+// The window is named at creation time rather than by renaming index 0
+// afterward, because the user's `base-index` may not be 0: with
+// `set -g base-index 1` the first window is index 1, so a `rename-window -t
+// name:0` would fail and abort session build. Naming via `-n` is index-agnostic.
+func NewSession(name, dir, windowName string) (string, error) {
+	id, err := run("new-session", "-d", "-s", name, "-n", windowName, "-c", dir, "-P", "-F", "#{window_id}")
 	if err != nil {
-		return fmt.Errorf("creating session %q: %w", name, err)
+		return "", fmt.Errorf("creating session %q: %w", name, err)
 	}
-	return nil
+	return id, nil
 }
 
-// NewWindow creates a window named `name` in `session`, with its cwd set to `dir`.
-func NewWindow(session, name, dir string) error {
-	_, err := run("new-window", "-t", session, "-n", name, "-c", dir)
+// NewWindow creates a window named `name` in `session`, with its cwd set to
+// `dir`, and returns the new window's stable id (e.g. "@5").
+func NewWindow(session, name, dir string) (string, error) {
+	id, err := run("new-window", "-t", session, "-n", name, "-c", dir, "-P", "-F", "#{window_id}")
 	if err != nil {
-		return fmt.Errorf("creating window %q in %q: %w", name, session, err)
+		return "", fmt.Errorf("creating window %q in %q: %w", name, session, err)
+	}
+	return id, nil
+}
+
+// PinWindow marks a window with the @pinned_name option so that shell prompt
+// hooks which auto-rename windows leave grove's name intact. This is grove's
+// side of a documented integration contract: a window-renaming hook checks
+// @pinned_name and skips windows that have it set. The value is grove's window
+// name; consumers only require it to be non-empty. windowID should be a stable
+// window id ("@5") as returned by NewSession/NewWindow.
+func PinWindow(windowID, name string) error {
+	if _, err := run("set-option", "-t", windowID, "-w", "@pinned_name", name); err != nil {
+		return fmt.Errorf("pinning window %q: %w", windowID, err)
 	}
 	return nil
 }
@@ -94,25 +114,6 @@ func ListSessions() ([]string, error) {
 		return nil, nil
 	}
 	return strings.Split(out, "\n"), nil
-}
-
-// SetWindowOption sets a tmux option on the given window.
-// Use this to persist metadata like @pinned_name so grove can identify
-// windows after auto-rename runs.
-func SetWindowOption(session, window, key, value string) error {
-	target := session + ":" + window
-	_, err := run("set-option", "-t", target, "-w", key, value)
-	return err
-}
-
-// RenameWindow renames the window at session:index to name.
-func RenameWindow(session, windowIndex, name string) error {
-	target := session + ":" + windowIndex
-	_, err := run("rename-window", "-t", target, name)
-	if err != nil {
-		return fmt.Errorf("renaming window %s: %w", target, err)
-	}
-	return nil
 }
 
 // AttachOrSwitch attaches to session if we are outside tmux, or switches the

@@ -58,6 +58,11 @@ trap cleanup EXIT
 
 TM kill-server 2>/dev/null || true
 TM new-session -d -s driver -x 220 -y 50 -c "$GROVE_HOME_ROOT"
+# Exercise a non-zero base-index: many users set `base-index 1`, and grove must
+# build sessions correctly under it (it names the home window rather than
+# assuming index 0). Sessions grove creates after this inherit the setting.
+TM set-option -g base-index 1
+TM set-option -g pane-base-index 1
 
 # send <window> <command> — type a command into a pane and wait for it to finish
 # by polling a per-call sentinel file. Returns the captured stdout+stderr.
@@ -84,12 +89,23 @@ echo
 bold "── session open builds the workspace"
 send driver "grove session open coding-project-big" >/dev/null
 windows="$(TM list-windows -t coding-project-big -F '#{window_index}:#{window_name}' 2>/dev/null)"
-assert_contains "home is window 0"            "0:home"        "$windows"
+# Index-agnostic: under base-index 1 home is window 1, not 0. Assert by name.
+assert_contains "home window present"         ":home"         "$windows"
 assert_eq       "lane count (home + 5 lanes)" "6"             "$(printf '%s\n' "$windows" | grep -c .)"
 assert_contains "repo-alpha · main lane"      "repo-alpha"    "$windows"
 assert_contains "repo-beta · feat/dirty lane" "feat/dirty"    "$windows"
 active="$(TM display-message -t coding-project-big -p '#{window_name}' 2>/dev/null)"
 assert_eq       "focus returns to home"       "home"          "$active"
+# Every grove window must carry @pinned_name so shell prompt hooks that auto-
+# rename windows leave grove's names intact (this is the contract that keeps the
+# display grammar alive on machines with a window-renaming precmd hook).
+home_pin="$(TM show-options -wqv -t coding-project-big:home @pinned_name 2>/dev/null)"
+assert_eq       "home window is pinned"       "home"          "$home_pin"
+lane_line="$(printf '%s\n' "$windows" | grep -m1 'feat/stale')"   # "<idx>:<name>"
+lane_idx="${lane_line%%:*}"
+lane_name="${lane_line#*:}"
+lane_pin="$(TM show-options -wqv -t "coding-project-big:$lane_idx" @pinned_name 2>/dev/null)"
+assert_eq       "lane window is pinned"       "$lane_name"    "$lane_pin"
 
 # ── session open is idempotent ────────────────────────────────────────────────
 bold "── session open is idempotent"
@@ -114,12 +130,12 @@ assert_contains "uses '·' separator" "·" "$wl"
 # ── window pick selection (POPUP_ACTIVE bypass + send-keys drives fzf) ─────────
 # select-window is client-free, so the active window genuinely changes.
 bold "── window pick selects and switches window"
-TM select-window -t coding-project-big:0
-TM send-keys -t coding-project-big:0 "GROVE_POPUP_ACTIVE=1 grove window pick" Enter
+TM select-window -t coding-project-big:home
+TM send-keys -t coding-project-big:home "GROVE_POPUP_ACTIVE=1 grove window pick" Enter
 sleep 1.2
-TM send-keys -t coding-project-big:0 "feat/stale"
+TM send-keys -t coding-project-big:home "feat/stale"
 sleep 0.8
-TM send-keys -t coding-project-big:0 Enter
+TM send-keys -t coding-project-big:home Enter
 sleep 1.2
 picked="$(TM display-message -t coding-project-big -p '#{window_name}')"
 assert_contains "window pick switched to feat/stale" "feat/stale" "$picked"
@@ -173,9 +189,9 @@ assert_contains "not-a-repo rejected"      "RC=1" "$err"
 
 # ── window delete guards ──────────────────────────────────────────────────────
 bold "── window delete guards"
-g1="$(send coding-project-big:0 "grove window delete home; echo RC=\$?")"
+g1="$(send coding-project-big:home "grove window delete home; echo RC=\$?")"
 assert_contains "cannot delete home"        "cannot delete the home window" "$g1"
-g2="$(send coding-project-big:0 "grove window delete nope; echo RC=\$?")"
+g2="$(send coding-project-big:home "grove window delete nope; echo RC=\$?")"
 assert_contains "missing window rejected"   "not found"                     "$g2"
 assert_contains "missing window lists opts" "Available windows"             "$g2"
 
@@ -195,8 +211,8 @@ fi
 
 # ── status / status-bar in a lane window ──────────────────────────────────────
 bold "── status reflects the focused window"
-TM select-window -t coding-project-big:0
-sb_home="$(send coding-project-big:0 "grove status-bar")"
+TM select-window -t coding-project-big:home
+sb_home="$(send coding-project-big:home "grove status-bar")"
 assert_eq "status-bar at home = session name" "coding-project-big" "$sb_home"
 
 # ── doctor detects fixture drift ──────────────────────────────────────────────
