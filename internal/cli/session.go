@@ -168,7 +168,7 @@ This command is designed to be bound to a tmux key in your tmux.conf:
 
 func init() {
 	sessionListCmd.Flags().BoolVar(&sessionListJSON, "json", false, "emit output as a JSON array")
-	sessionPickCmd.Flags().BoolVar(&sessionPickEmitRows, "emit-rows", false, "print picker rows to stdout and exit (used by fzf reload binding)")
+	sessionPickCmd.Flags().BoolVar(&sessionPickEmitRows, "emit-rows", false, "print the tab-delimited picker rows to stdout and exit (for scripting/external pickers)")
 	sessionCmd.AddCommand(sessionOpenCmd)
 	sessionCmd.AddCommand(sessionListCmd)
 	sessionCmd.AddCommand(sessionDeleteCmd)
@@ -591,26 +591,32 @@ func runSessionPick() error {
 		return nil
 	}
 
-	// Inside popup (or outside tmux): start fzf with empty input and reload
-	// the full session list on each keystroke. This keeps the picker blank until
-	// the user starts typing, avoiding a wall of entries on open.
-	self, selfErr := os.Executable()
-	if selfErr != nil {
-		return fmt.Errorf("resolving executable path: %w", selfErr)
+	// Inside popup (or outside tmux): show the full context list and let fzf
+	// fuzzy-filter it as the user types. The rows are built once and passed to
+	// the picker populated.
+	//
+	// Why not "blank until you type" with a per-keystroke reload: that approach
+	// (a) re-runs the git scan on every keypress and (b) renders an empty,
+	// near-zero-height fzf on open that looks broken — the "blank compact
+	// picker" failure mode the design doc explicitly forbids. A populated list
+	// is faster and legible, and matches `grove window pick`.
+	rows, _, err := buildSessionPickRows()
+	if err != nil {
+		return err
 	}
-	emitCmd := self + " session pick --emit-rows"
+	if len(rows) == 0 {
+		// No contexts to choose from — nothing to do, exit cleanly.
+		return nil
+	}
 	pickerArgs := []string{
-		"--height", "~12",
-		"--min-height", "0",
-		"--no-info",
 		"--reverse",
+		"--no-info",
+		// Rows are "<name>\t<tier>  <n> lanes [*]". fzf renders the tab as
+		// whitespace so the display stays aligned; splitting on \t below always
+		// recovers the exact name even when it contains spaces.
 		"--delimiter", "\t",
-		// Start with an empty list; reload from grove on every keystroke.
-		"--bind", "change:reload(" + emitCmd + ")+first",
-		// On open, show nothing — reload only fires on change, so initial state is empty.
-		"--bind", "start:reload(echo '')",
 	}
-	chosen, err := picker.NewFzf(cfg.Picker, pickerArgs...).Select([]string{})
+	chosen, err := picker.NewFzf(cfg.Picker, pickerArgs...).Select(rows)
 	if err != nil {
 		if errors.Is(err, picker.ErrCancelled) {
 			return nil
@@ -620,6 +626,10 @@ func runSessionPick() error {
 
 	// Name is the first tab-delimited field — safe for names containing spaces.
 	name := strings.SplitN(chosen, "\t", 2)[0]
+	if name == "" {
+		// Defensive: a blank selection is never a real context.
+		return nil
+	}
 	return runSessionOpen(name)
 }
 
