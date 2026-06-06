@@ -45,9 +45,16 @@ func (f *Fzf) Select(rows []string) (string, error) {
 	out, err := cmd.Output()
 	if err != nil {
 		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() == 130 {
-			// fzf exits 130 when the user presses Escape or Ctrl-C.
-			return "", ErrCancelled
+		if errors.As(err, &exitErr) {
+			switch exitErr.ExitCode() {
+			case 1:
+				// fzf exits 1 when there are no matches (empty list or query
+				// filtered everything). Treat as a cancel — no selection was made.
+				return "", ErrCancelled
+			case 130:
+				// fzf exits 130 when the user presses Escape or Ctrl-C.
+				return "", ErrCancelled
+			}
 		}
 		return "", fmt.Errorf("%s: %w", f.Binary, err)
 	}

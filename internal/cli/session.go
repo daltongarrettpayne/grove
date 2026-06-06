@@ -126,6 +126,8 @@ Exits 0 on success. Exits non-zero if the session is not found or kill fails.`,
 	},
 }
 
+var sessionPickEmitRows bool
+
 var sessionPickCmd = &cobra.Command{
 	Use:   "pick",
 	Short: "Open the fzf session picker and switch to the selected context",
@@ -157,12 +159,16 @@ This command is designed to be bound to a tmux key in your tmux.conf:
   # Typical tmux.conf binding:
   bind-key S run-shell "grove session pick"`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if sessionPickEmitRows {
+			return runSessionPickEmitRows()
+		}
 		return runSessionPick()
 	},
 }
 
 func init() {
 	sessionListCmd.Flags().BoolVar(&sessionListJSON, "json", false, "emit output as a JSON array")
+	sessionPickCmd.Flags().BoolVar(&sessionPickEmitRows, "emit-rows", false, "print the tab-delimited picker rows to stdout and exit (for scripting/external pickers)")
 	sessionCmd.AddCommand(sessionOpenCmd)
 	sessionCmd.AddCommand(sessionListCmd)
 	sessionCmd.AddCommand(sessionDeleteCmd)
@@ -218,18 +224,20 @@ func runSessionOpen(name string) error {
 			return fmt.Errorf("home dir %s does not exist: %w", found.HomeDir, statErr)
 		}
 
-		// Step 4a: Create the session rooted at the home directory.
+		// Step 4a: Create the session rooted at the home directory, with the
+		// home window (lane 0) named at creation. Naming it here rather than
+		// renaming index 0 keeps this correct under any base-index setting.
 		slog.Info("creating session", "name", name, "home", found.HomeDir)
-		if err := tmux.NewSession(name, found.HomeDir); err != nil {
+		homeID, err := tmux.NewSession(name, found.HomeDir, "home")
+		if err != nil {
 			return fmt.Errorf("creating session %q: %w", name, err)
 		}
-
-		// Step 4b: Rename window 0 to "home".
-		if err := tmux.RenameWindow(name, "0", "home"); err != nil {
-			return fmt.Errorf("renaming home window in %q: %w", name, err)
+		// Pin the home window so shell prompt hooks don't rename it.
+		if err := tmux.PinWindow(homeID, "home"); err != nil {
+			return fmt.Errorf("pinning home window in %q: %w", name, err)
 		}
 
-		// Step 4c: Scan the code container if it exists.
+		// Step 4b: Scan the code container if it exists.
 		var lanes []model.Lane
 		codeContainer := filepath.Join(cfg.CodeRoot, name)
 		if _, statErr := os.Stat(codeContainer); statErr == nil {
@@ -251,8 +259,14 @@ func runSessionOpen(name string) error {
 		for _, lane := range lanes {
 			windowName := lane.DisplayRow(maxRepoLen)
 			slog.Debug("creating window", "session", name, "window", windowName, "dir", lane.Dir)
-			if err := tmux.NewWindow(name, windowName, lane.Dir); err != nil {
+			wid, err := tmux.NewWindow(name, windowName, lane.Dir)
+			if err != nil {
 				return fmt.Errorf("creating window %q in session %q: %w", windowName, name, err)
+			}
+			// Pin the lane window so shell prompt hooks don't rename it away
+			// from grove's "<repo>  ·  <branch>" grammar.
+			if err := tmux.PinWindow(wid, windowName); err != nil {
+				return fmt.Errorf("pinning window %q in session %q: %w", windowName, name, err)
 			}
 		}
 
@@ -523,6 +537,18 @@ func buildSessionPickRows() (rows []string, maxNameLen int, err error) {
 	return rows, maxNameLen, nil
 }
 
+// runSessionPickEmitRows prints the tab-delimited picker rows to stdout and exits.
+// This is the fzf reload target: the picker calls "grove session pick --emit-rows"
+// on every keystroke so the list is only populated once the user starts typing.
+func runSessionPickEmitRows() error {
+	rows, _, err := buildSessionPickRows()
+	if err != nil {
+		return err
+	}
+	fmt.Println(strings.Join(rows, "\n"))
+	return nil
+}
+
 func runSessionPick() error {
 	// When inside tmux and not already running inside a popup, re-invoke self
 	// as a tmux display-popup so the picker floats over the current window.
@@ -554,35 +580,55 @@ func runSessionPick() error {
 		if selfErr != nil {
 			return fmt.Errorf("resolving executable path: %w", selfErr)
 		}
-		cmd := exec.Command("tmux", "display-popup",
+		popupArgs := append(tmux.SocketArgs(), "display-popup",
 			"-w", strconv.Itoa(width),
 			"-h", strconv.Itoa(height+2),
 			"-e", "GROVE_POPUP_ACTIVE=1",
 			"-e", "GROVE_HOME_ROOT="+cfg.HomeRoot,
 			"-e", "GROVE_CODE_ROOT="+cfg.CodeRoot,
-			"-E", self+" session pick",
 		)
+		if cfg.TmuxSocket != "" {
+			popupArgs = append(popupArgs, "-e", "GROVE_TMUX_SOCKET="+cfg.TmuxSocket)
+		}
+		popupArgs = append(popupArgs, "-E", self+" session pick")
+		cmd := exec.Command("tmux", popupArgs...)
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-		return cmd.Run()
+		// Ignore the display-popup exit code. When the user selects a session,
+		// switch-client closes the popup mid-execution, which kills the inner grove
+		// process and causes display-popup to exit non-zero. That is the successful
+		// case. Any genuine error was already shown inside the popup terminal.
+		_ = cmd.Run()
+		return nil
 	}
 
-	// Inside popup (or outside tmux): build rows and run the picker.
+	// Inside popup (or outside tmux): show the full context list and let fzf
+	// fuzzy-filter it as the user types. The rows are built once and passed to
+	// the picker populated.
+	//
+	// Why not "blank until you type" with a per-keystroke reload: that approach
+	// (a) re-runs the git scan on every keypress and (b) renders an empty,
+	// near-zero-height fzf on open that looks broken — the "blank compact
+	// picker" failure mode the design doc explicitly forbids. A populated list
+	// is faster and legible, and matches `grove window pick`.
 	rows, _, err := buildSessionPickRows()
 	if err != nil {
 		return err
 	}
-
-	// Compact mode: show nothing until the user types, then display up to 4
-	// matching rows. The full list is always available by clearing the query.
-	compactArgs := []string{
-		"--height", "~4",
-		"--min-height", "0",
-		"--no-info",
-		"--reverse",
+	if len(rows) == 0 {
+		// No contexts to choose from — nothing to do, exit cleanly.
+		return nil
 	}
-	chosen, err := picker.NewFzf(cfg.Picker, compactArgs...).Select(rows)
+	pickerArgs := []string{
+		"--reverse",
+		"--no-info",
+		// Rows are "<name>\t<tier>  <n> lanes [*]". fzf renders the tab as
+		// whitespace so the display stays aligned; splitting on \t below always
+		// recovers the exact name even when it contains spaces.
+		"--delimiter", "\t",
+	}
+	chosen, err := picker.NewFzf(cfg.Picker, pickerArgs...).Select(rows)
 	if err != nil {
 		if errors.Is(err, picker.ErrCancelled) {
 			return nil
@@ -592,6 +638,10 @@ func runSessionPick() error {
 
 	// Name is the first tab-delimited field — safe for names containing spaces.
 	name := strings.SplitN(chosen, "\t", 2)[0]
+	if name == "" {
+		// Defensive: a blank selection is never a real context.
+		return nil
+	}
 	return runSessionOpen(name)
 }
 

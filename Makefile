@@ -1,6 +1,6 @@
 # grove Makefile
 # All targets are PHONY (no files named build/test/etc. in the repo).
-.PHONY: build install test test-integration lint clean fixtures docker-build docker-run dev dev-fast
+.PHONY: build install test test-integration integration lint clean fixtures docker-build docker-run dev dev-fast
 
 BINARY   := grove
 CMD      := ./cmd/grove
@@ -35,6 +35,12 @@ clean:
 ## fixtures: build grove then generate the deterministic test world at /tmp/grove-fixtures
 fixtures: build
 	go run ./test/fixtures/gen -grove $(BIN_DIR)/$(BINARY)
+
+## integration: run the tmux/git/picker integration harness in the clean-room
+##   Drives session/window/worktree/project/status/doctor end to end against an
+##   isolated tmux server and asserts on the resulting state. No client needed.
+integration: docker-build
+	docker run --rm --entrypoint bash grove-dev scripts/integration-test.sh
 
 ## docker-build: build the dev/test clean-room image
 docker-build:

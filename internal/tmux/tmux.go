@@ -18,9 +18,33 @@ var (
 	ErrSessionExists = errors.New("session already exists")
 )
 
+// socket is the optional private tmux socket path. When set, every tmux
+// invocation targets it via `-S` so grove addresses the same server whether or
+// not it is run from inside a tmux session.
+var socket string
+
+// SetSocket configures the tmux socket grove talks to. Empty means use tmux's
+// default socket. Call once at startup from the loaded config.
+func SetSocket(s string) { socket = s }
+
+// SocketArgs returns the `-S <socket>` prefix when a private socket is
+// configured, or nil. Exposed so callers that build their own tmux command
+// line (e.g. display-popup) target the same server as the rest of grove.
+func SocketArgs() []string {
+	if socket == "" {
+		return nil
+	}
+	return []string{"-S", socket}
+}
+
+// command builds an *exec.Cmd for tmux with the socket prefix applied.
+func command(args ...string) *exec.Cmd {
+	return exec.Command("tmux", append(SocketArgs(), args...)...)
+}
+
 // run executes a tmux command and returns trimmed stdout.
 func run(args ...string) (string, error) {
-	cmd := exec.Command("tmux", args...)
+	cmd := command(args...)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("tmux %s: %w", strings.Join(args, " "), err)
@@ -30,7 +54,7 @@ func run(args ...string) (string, error) {
 
 // HasSession reports whether a tmux session with the given name is running.
 func HasSession(name string) (bool, error) {
-	err := exec.Command("tmux", "has-session", "-t", name).Run()
+	err := command("has-session", "-t", name).Run()
 	if err == nil {
 		return true, nil
 	}
@@ -42,20 +66,40 @@ func HasSession(name string) (bool, error) {
 	return false, fmt.Errorf("tmux has-session: %w", err)
 }
 
-// NewSession creates a new detached session named `name` rooted at `dir`.
-func NewSession(name, dir string) error {
-	_, err := run("new-session", "-d", "-s", name, "-c", dir)
+// NewSession creates a new detached session named `name` rooted at `dir`, with
+// its initial window named `windowName`.
+//
+// The window is named at creation time rather than by renaming index 0
+// afterward, because the user's `base-index` may not be 0: with
+// `set -g base-index 1` the first window is index 1, so a `rename-window -t
+// name:0` would fail and abort session build. Naming via `-n` is index-agnostic.
+func NewSession(name, dir, windowName string) (string, error) {
+	id, err := run("new-session", "-d", "-s", name, "-n", windowName, "-c", dir, "-P", "-F", "#{window_id}")
 	if err != nil {
-		return fmt.Errorf("creating session %q: %w", name, err)
+		return "", fmt.Errorf("creating session %q: %w", name, err)
 	}
-	return nil
+	return id, nil
 }
 
-// NewWindow creates a window named `name` in `session`, with its cwd set to `dir`.
-func NewWindow(session, name, dir string) error {
-	_, err := run("new-window", "-t", session, "-n", name, "-c", dir)
+// NewWindow creates a window named `name` in `session`, with its cwd set to
+// `dir`, and returns the new window's stable id (e.g. "@5").
+func NewWindow(session, name, dir string) (string, error) {
+	id, err := run("new-window", "-t", session, "-n", name, "-c", dir, "-P", "-F", "#{window_id}")
 	if err != nil {
-		return fmt.Errorf("creating window %q in %q: %w", name, session, err)
+		return "", fmt.Errorf("creating window %q in %q: %w", name, session, err)
+	}
+	return id, nil
+}
+
+// PinWindow marks a window with the @pinned_name option so that shell prompt
+// hooks which auto-rename windows leave grove's name intact. This is grove's
+// side of a documented integration contract: a window-renaming hook checks
+// @pinned_name and skips windows that have it set. The value is grove's window
+// name; consumers only require it to be non-empty. windowID should be a stable
+// window id ("@5") as returned by NewSession/NewWindow.
+func PinWindow(windowID, name string) error {
+	if _, err := run("set-option", "-t", windowID, "-w", "@pinned_name", name); err != nil {
+		return fmt.Errorf("pinning window %q: %w", windowID, err)
 	}
 	return nil
 }
@@ -72,25 +116,6 @@ func ListSessions() ([]string, error) {
 	return strings.Split(out, "\n"), nil
 }
 
-// SetWindowOption sets a tmux option on the given window.
-// Use this to persist metadata like @pinned_name so grove can identify
-// windows after auto-rename runs.
-func SetWindowOption(session, window, key, value string) error {
-	target := session + ":" + window
-	_, err := run("set-option", "-t", target, "-w", key, value)
-	return err
-}
-
-// RenameWindow renames the window at session:index to name.
-func RenameWindow(session, windowIndex, name string) error {
-	target := session + ":" + windowIndex
-	_, err := run("rename-window", "-t", target, name)
-	if err != nil {
-		return fmt.Errorf("renaming window %s: %w", target, err)
-	}
-	return nil
-}
-
 // AttachOrSwitch attaches to session if we are outside tmux, or switches the
 // client to it if we are already inside a tmux session ($TMUX is set).
 func AttachOrSwitch(name string) error {
@@ -101,7 +126,7 @@ func AttachOrSwitch(name string) error {
 		}
 		return nil
 	}
-	cmd := exec.Command("tmux", "attach-session", "-t", name)
+	cmd := command("attach-session", "-t", name)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -155,6 +180,15 @@ func KillSession(name string) error {
 	return nil
 }
 
+// KillCurrentWindow kills the window the calling pane belongs to (no -t).
+// Intended for use from inside a tmux session.
+func KillCurrentWindow() error {
+	if err := command("kill-window").Run(); err != nil {
+		return fmt.Errorf("tmux kill-window: %w", err)
+	}
+	return nil
+}
+
 // ListWindows returns the names of all windows in the given session.
 func ListWindows(session string) ([]string, error) {
 	out, err := run("list-windows", "-t", session, "-F", "#{window_name}")
@@ -171,7 +205,7 @@ func ListWindows(session string) ([]string, error) {
 // Returns nil if the window was not found (idempotent).
 func KillWindow(session, windowName string) error {
 	target := session + ":" + windowName
-	err := exec.Command("tmux", "kill-window", "-t", target).Run()
+	err := command("kill-window", "-t", target).Run()
 	if err == nil {
 		return nil
 	}

@@ -60,15 +60,17 @@ grove window pick
 | `grove project list` | List all available contexts as JSON | |
 | `grove project archive <name>` | Move a context to `04-Archive/` | |
 | `grove session open <name>` | Build (or attach to) a tmux session for a context | |
-| `grove session list` | List all available contexts and their lanes as JSON | |
+| `grove session list` | List all available contexts and their lanes | `--json` |
+| `grove session pick` | Open the fzf picker and open/switch to the chosen context | bind to a tmux key (see below) |
 | `grove session delete <name>` | Kill a tmux session | |
 | `grove window list [<ctx>]` | List windows for a context; marks the current window | |
-| `grove window pick` | Open the fzf picker and switch to the chosen window | |
+| `grove window pick` | Open the fzf picker and switch to the chosen window | bind to a tmux key (see below) |
 | `grove window delete [<name>]` | Delete a tmux window by name | |
 | `grove worktree new <branch>` | Create a linked worktree and register it as a lane | `--repo <path>` to specify the main repo |
-| `grove worktree list` | List all worktrees in the current session's context | |
+| `grove worktree list` | List all worktrees in the current session's context | `--json` |
 | `grove worktree delete <branch>` | Remove a linked worktree and its tmux window | |
-| `grove status-segment` | Print the tmux status-right segment for the current window | |
+| `grove status` | Print the current context (session / repo / branch) | `--short`, `--json` |
+| `grove status-bar` | Compact one-line context for tmux `status-left`/`status-right` | |
 | `grove doctor` | Audit vault and code directories for convention violations | `--json`, `--check <category>` |
 
 ## Configuration
@@ -77,13 +79,32 @@ grove window pick
 |---|---|---|
 | `GROVE_CODE_ROOT` | `~/code` | Root directory scanned for code repos |
 | `GROVE_HOME_ROOT` | `~` | Root of the knowledge/vault tree |
-| `GROVE_TMUX_SOCKET` | (system default) | Custom tmux socket path |
+| `GROVE_TMUX_SOCKET` | (system default) | tmux socket path; grove targets it via `-S` on every call, so all grove sessions live on one isolated socket |
 | `GROVE_PICKER` | `fzf` | Picker binary (must read rows on stdin, write selection to stdout) |
-| `GROVE_LOG_LEVEL` | `info` | Log level: `debug`, `info`, `warn`, `error` |
+| `GROVE_LOG_LEVEL` | `warn` | Log level: `debug`, `info`, `warn`, `error` |
 
 Config priority (high to low): CLI flags > environment variables > defaults.
 
 Any picker binary that reads newline-separated rows on stdin and writes the chosen row to stdout works: `fzf`, `sk` (skim), `fzy`, etc.
+
+## Shell integration
+
+Bind the pickers to tmux keys in your `tmux.conf` (they open as a floating popup when run inside tmux):
+
+```tmux
+bind -n M-f run-shell 'grove session pick'   # Alt-f: jump to any context
+bind -n M-w run-shell 'grove window pick'     # Alt-w: jump to any window in this context
+set -g status-left '#(grove status-bar)'      # show session › branch in the status line
+```
+
+**Window naming.** grove names each window it creates (`home`, `<repo>  ·  <branch>`) and marks it with the `@pinned_name` tmux window option. If you run a shell prompt hook that auto-renames the tmux window to the cwd or repo (a common `precmd`/`chpwd` pattern), have it skip windows that have `@pinned_name` set so grove's names survive:
+
+```sh
+# in your precmd hook:
+[ -n "$(tmux show-options -wqv @pinned_name)" ] && return   # leave grove's window name alone
+```
+
+**base-index.** grove builds correctly whether your `base-index` is 0 or 1 — it never assumes a fixed window index.
 
 ## Contributing
 
