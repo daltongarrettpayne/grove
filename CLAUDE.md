@@ -292,6 +292,14 @@ func run(args ...string) (string, error) {
 
 Always validate preconditions before mutating tmux state (does the session exist? does the directory exist?). Never half-build a session.
 
+**tmux integration contracts (don't regress these — they only bite on real machines, not the default-config clean room):**
+
+- **Never assume a window index.** Users set `base-index 1`; the first window is then index 1, not 0. Name windows at creation (`new-session -n`, `new-window -n`) and address them by name or by the `#{window_id}` returned from creation — never `session:0`.
+- **Pin every window grove names** with the `@pinned_name` window option (`tmux.PinWindow`). Shell prompt hooks commonly auto-rename the tmux window to the cwd/repo; the convention is that they skip windows with `@pinned_name` set. Without it, grove's `home` / `<repo>  ·  <branch>` names get clobbered every prompt and the whole display grammar, status-bar, and window pick break.
+- **Honor `GROVE_TMUX_SOCKET`** on every invocation (`tmux.SetSocket` / the `-S` prefix in `tmux.command`), including the `display-popup` spawns, which must also forward the socket into the popup env. `$TMUX` masks this from *inside* a session, but it matters whenever grove drives tmux from outside one.
+
+The integration harness exercises all three under `base-index 1`; keep it green.
+
 ---
 
 ## Testing
@@ -349,8 +357,16 @@ Tests use `/tmp/grove-fixtures`, never `~/code` or `~/life-vault`.
 ```sh
 make test                 # go test -race -cover ./...
 make test-integration     # generates fixtures, then go test -race -tags integration ./test/...
+make integration          # tmux/git/picker integration harness in the Docker clean-room
 make lint                 # golangci-lint run
 ```
+
+`make integration` runs `scripts/integration-test.sh` inside the clean-room: it
+stands up an isolated tmux server (under `base-index 1`, to catch index
+assumptions), drives session/window/worktree/project/status/doctor end to end,
+and asserts on observable tmux + filesystem state — the coverage the unit tests
+can't reach. `scripts/smoke-test.sh` is the lighter "run every command and show
+its output" pass. Both run headless (no attached client needed).
 
 ---
 

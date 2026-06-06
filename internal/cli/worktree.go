@@ -229,8 +229,13 @@ func runWorktreeNew(branch, repo string) error {
 			return fmt.Errorf("getting tmux session name: %w", err)
 		}
 		windowName := repoName + "  ·  " + branch
-		if err := tmux.NewWindow(sessionName, windowName, dest); err != nil {
+		wid, err := tmux.NewWindow(sessionName, windowName, dest)
+		if err != nil {
 			return fmt.Errorf("creating tmux window: %w", err)
+		}
+		// Pin so shell prompt hooks leave grove's window name intact.
+		if err := tmux.PinWindow(wid, windowName); err != nil {
+			return fmt.Errorf("pinning tmux window: %w", err)
 		}
 		slog.Info("registered tmux window", "session", sessionName, "window", windowName)
 	}

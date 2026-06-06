@@ -6,11 +6,17 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
 
 	"github.com/spf13/cobra"
 
 	"github.com/daltongarrettpayne/grove/internal/model"
+	"github.com/daltongarrettpayne/grove/internal/picker"
 	"github.com/daltongarrettpayne/grove/internal/scanner"
 	"github.com/daltongarrettpayne/grove/internal/tmux"
 )
@@ -120,11 +126,53 @@ Exits 0 on success. Exits non-zero if the session is not found or kill fails.`,
 	},
 }
 
+var sessionPickEmitRows bool
+
+var sessionPickCmd = &cobra.Command{
+	Use:   "pick",
+	Short: "Open the fzf session picker and switch to the selected context",
+	Long: `Open an interactive picker over all vault contexts, then open or switch to
+the chosen grove session.
+
+Preconditions:
+  - The picker binary (default: fzf) must be on PATH. Override with GROVE_PICKER.
+  - GROVE_HOME_ROOT must contain 01-Projects/ and/or 02-Areas/ subdirectories.
+
+When invoked inside tmux (and not already inside a popup), grove re-invokes
+itself inside a tmux display-popup so the picker floats over the current window.
+
+What it does:
+  1. Scans 01-Projects/ and 02-Areas/ under GROVE_HOME_ROOT for context directories.
+  2. Builds a row per context: name, tier, lane count, live-session indicator.
+  3. Passes the rows to the picker binary via stdin.
+  4. On selection, calls "grove session open <name>" to create/attach the session.
+  5. On cancel (Esc / Ctrl-C), exits silently with code 0.
+
+This command is designed to be bound to a tmux key in your tmux.conf:
+  bind-key S run-shell "grove session pick"`,
+	Example: `  # Open the session picker (inside tmux — opens as a floating popup):
+  grove session pick
+
+  # Open the picker outside tmux (inline fzf):
+  GROVE_HOME_ROOT=~/vault grove session pick
+
+  # Typical tmux.conf binding:
+  bind-key S run-shell "grove session pick"`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if sessionPickEmitRows {
+			return runSessionPickEmitRows()
+		}
+		return runSessionPick()
+	},
+}
+
 func init() {
 	sessionListCmd.Flags().BoolVar(&sessionListJSON, "json", false, "emit output as a JSON array")
+	sessionPickCmd.Flags().BoolVar(&sessionPickEmitRows, "emit-rows", false, "print the tab-delimited picker rows to stdout and exit (for scripting/external pickers)")
 	sessionCmd.AddCommand(sessionOpenCmd)
 	sessionCmd.AddCommand(sessionListCmd)
 	sessionCmd.AddCommand(sessionDeleteCmd)
+	sessionCmd.AddCommand(sessionPickCmd)
 	rootCmd.AddCommand(sessionCmd)
 }
 
@@ -176,18 +224,20 @@ func runSessionOpen(name string) error {
 			return fmt.Errorf("home dir %s does not exist: %w", found.HomeDir, statErr)
 		}
 
-		// Step 4a: Create the session rooted at the home directory.
+		// Step 4a: Create the session rooted at the home directory, with the
+		// home window (lane 0) named at creation. Naming it here rather than
+		// renaming index 0 keeps this correct under any base-index setting.
 		slog.Info("creating session", "name", name, "home", found.HomeDir)
-		if err := tmux.NewSession(name, found.HomeDir); err != nil {
+		homeID, err := tmux.NewSession(name, found.HomeDir, "home")
+		if err != nil {
 			return fmt.Errorf("creating session %q: %w", name, err)
 		}
-
-		// Step 4b: Rename window 0 to "home".
-		if err := tmux.RenameWindow(name, "0", "home"); err != nil {
-			return fmt.Errorf("renaming home window in %q: %w", name, err)
+		// Pin the home window so shell prompt hooks don't rename it.
+		if err := tmux.PinWindow(homeID, "home"); err != nil {
+			return fmt.Errorf("pinning home window in %q: %w", name, err)
 		}
 
-		// Step 4c: Scan the code container if it exists.
+		// Step 4b: Scan the code container if it exists.
 		var lanes []model.Lane
 		codeContainer := filepath.Join(cfg.CodeRoot, name)
 		if _, statErr := os.Stat(codeContainer); statErr == nil {
@@ -209,8 +259,14 @@ func runSessionOpen(name string) error {
 		for _, lane := range lanes {
 			windowName := lane.DisplayRow(maxRepoLen)
 			slog.Debug("creating window", "session", name, "window", windowName, "dir", lane.Dir)
-			if err := tmux.NewWindow(name, windowName, lane.Dir); err != nil {
+			wid, err := tmux.NewWindow(name, windowName, lane.Dir)
+			if err != nil {
 				return fmt.Errorf("creating window %q in session %q: %w", windowName, name, err)
+			}
+			// Pin the lane window so shell prompt hooks don't rename it away
+			// from grove's "<repo>  ·  <branch>" grammar.
+			if err := tmux.PinWindow(wid, windowName); err != nil {
+				return fmt.Errorf("pinning window %q in session %q: %w", windowName, name, err)
 			}
 		}
 
@@ -347,6 +403,246 @@ func runSessionList(asJSON bool) error {
 		)
 	}
 	return nil
+}
+
+// buildSessionPickRows scans vault tiers and returns fzf-ready rows plus the
+// maximum context name length (used to size the popup).
+//
+// Row format (space-aligned):
+//
+//	coding-project-big    project  5 lanes  *
+//	coding-project-small  project  2 lanes
+//	health                area     0 lanes
+//
+// The trailing "*" appears when a live tmux session with that name exists.
+// Lane counting and session checks are run concurrently across all contexts.
+func buildSessionPickRows() (rows []string, maxNameLen int, err error) {
+	tiers := []struct {
+		dir   string
+		label string
+		idx   int // ordering index: 0 = project, 1 = area
+	}{
+		{"01-Projects", "project", 0},
+		{"02-Areas", "area", 1},
+	}
+
+	type rowEntry struct {
+		name      string
+		tierLabel string
+		tierIdx   int
+		laneCount int
+		live      bool
+	}
+
+	// First pass: enumerate directories synchronously (fast, no git calls).
+	var potentialEntries []rowEntry
+	for _, tier := range tiers {
+		tierDir := filepath.Join(cfg.HomeRoot, tier.dir)
+		dirEntries, readErr := os.ReadDir(tierDir)
+		if readErr != nil {
+			if errors.Is(readErr, os.ErrNotExist) {
+				continue
+			}
+			return nil, 0, fmt.Errorf("reading vault tier %s: %w", tierDir, readErr)
+		}
+		for _, e := range dirEntries {
+			if !e.IsDir() || isHiddenName(e.Name()) {
+				continue
+			}
+			potentialEntries = append(potentialEntries, rowEntry{
+				name:      e.Name(),
+				tierLabel: tier.label,
+				tierIdx:   tier.idx,
+			})
+		}
+	}
+
+	// Second pass: fan out scanner + HasSession calls concurrently.
+	type scanResult struct {
+		entry rowEntry
+		err   error
+	}
+	ch := make(chan scanResult, len(potentialEntries))
+	var wg sync.WaitGroup
+	for _, e := range potentialEntries {
+		wg.Add(1)
+		go func(e rowEntry) {
+			defer wg.Done()
+			codeContainer := filepath.Join(cfg.CodeRoot, e.name)
+			if _, statErr := os.Stat(codeContainer); statErr == nil {
+				scanned, scanErr := scanner.ScanSourceSet(model.SourceSet{codeContainer})
+				if scanErr != nil {
+					ch <- scanResult{err: fmt.Errorf("scanning %s: %w", codeContainer, scanErr)}
+					return
+				}
+				e.laneCount = len(scanned)
+			}
+
+			live, sessErr := tmux.HasSession(e.name)
+			if sessErr != nil {
+				slog.Debug("tmux.HasSession error", "name", e.name, "err", sessErr)
+			}
+			e.live = live
+			ch <- scanResult{entry: e}
+		}(e)
+	}
+
+	// Close channel once all goroutines finish.
+	go func() {
+		wg.Wait()
+		close(ch)
+	}()
+
+	// Collect results, propagating any scan error.
+	var entries []rowEntry
+	for r := range ch {
+		if r.err != nil {
+			return nil, 0, r.err
+		}
+		entries = append(entries, r.entry)
+	}
+
+	// Sort by (tierIdx, name) to maintain stable, deterministic output order
+	// regardless of goroutine scheduling.
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].tierIdx != entries[j].tierIdx {
+			return entries[i].tierIdx < entries[j].tierIdx
+		}
+		return entries[i].name < entries[j].name
+	})
+
+	// Build rows and compute max name length in a single pass.
+	rows = make([]string, 0, len(entries))
+	for _, e := range entries {
+		if len(e.name) > maxNameLen {
+			maxNameLen = len(e.name)
+		}
+		laneWord := "lanes"
+		if e.laneCount == 1 {
+			laneWord = "lane"
+		}
+		// Tab-delimited: name + TAB + rest. Fzf renders tabs as spaces so the
+		// display looks aligned, but splitting on \t always recovers the exact
+		// name even when it contains spaces (e.g. "AI Eng Job Hunt").
+		row := fmt.Sprintf("%s\t%-7s  %d %s",
+			e.name,
+			e.tierLabel,
+			e.laneCount, laneWord,
+		)
+		if e.live {
+			row += "  *"
+		}
+		rows = append(rows, row)
+	}
+	return rows, maxNameLen, nil
+}
+
+// runSessionPickEmitRows prints the tab-delimited picker rows to stdout and exits.
+// This is the fzf reload target: the picker calls "grove session pick --emit-rows"
+// on every keystroke so the list is only populated once the user starts typing.
+func runSessionPickEmitRows() error {
+	rows, _, err := buildSessionPickRows()
+	if err != nil {
+		return err
+	}
+	fmt.Println(strings.Join(rows, "\n"))
+	return nil
+}
+
+func runSessionPick() error {
+	// When inside tmux and not already running inside a popup, re-invoke self
+	// as a tmux display-popup so the picker floats over the current window.
+	if os.Getenv("TMUX") != "" && os.Getenv("GROVE_POPUP_ACTIVE") != "1" {
+		// We need the row count to size the popup, so we build rows twice:
+		// once here to compute dimensions, then again inside the popup.
+		rows, maxNameLen, err := buildSessionPickRows()
+		if err != nil {
+			return err
+		}
+
+		// Width: max name len + tier (7) + lane count col + padding + borders.
+		// A typical row looks like: "<name>  project  5 lanes  *"
+		// That's maxNameLen + 2 + 7 + 2 + ~10 chars = maxNameLen + ~21.
+		// Add 6 for fzf chrome.
+		width := maxNameLen + 27
+		if width < 40 {
+			width = 40
+		}
+		height := len(rows) + 6
+		if height > 30 {
+			height = 30
+		}
+		if height < 12 {
+			height = 12
+		}
+
+		self, selfErr := os.Executable()
+		if selfErr != nil {
+			return fmt.Errorf("resolving executable path: %w", selfErr)
+		}
+		popupArgs := append(tmux.SocketArgs(), "display-popup",
+			"-w", strconv.Itoa(width),
+			"-h", strconv.Itoa(height+2),
+			"-e", "GROVE_POPUP_ACTIVE=1",
+			"-e", "GROVE_HOME_ROOT="+cfg.HomeRoot,
+			"-e", "GROVE_CODE_ROOT="+cfg.CodeRoot,
+		)
+		if cfg.TmuxSocket != "" {
+			popupArgs = append(popupArgs, "-e", "GROVE_TMUX_SOCKET="+cfg.TmuxSocket)
+		}
+		popupArgs = append(popupArgs, "-E", self+" session pick")
+		cmd := exec.Command("tmux", popupArgs...)
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		// Ignore the display-popup exit code. When the user selects a session,
+		// switch-client closes the popup mid-execution, which kills the inner grove
+		// process and causes display-popup to exit non-zero. That is the successful
+		// case. Any genuine error was already shown inside the popup terminal.
+		_ = cmd.Run()
+		return nil
+	}
+
+	// Inside popup (or outside tmux): show the full context list and let fzf
+	// fuzzy-filter it as the user types. The rows are built once and passed to
+	// the picker populated.
+	//
+	// Why not "blank until you type" with a per-keystroke reload: that approach
+	// (a) re-runs the git scan on every keypress and (b) renders an empty,
+	// near-zero-height fzf on open that looks broken — the "blank compact
+	// picker" failure mode the design doc explicitly forbids. A populated list
+	// is faster and legible, and matches `grove window pick`.
+	rows, _, err := buildSessionPickRows()
+	if err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		// No contexts to choose from — nothing to do, exit cleanly.
+		return nil
+	}
+	pickerArgs := []string{
+		"--reverse",
+		"--no-info",
+		// Rows are "<name>\t<tier>  <n> lanes [*]". fzf renders the tab as
+		// whitespace so the display stays aligned; splitting on \t below always
+		// recovers the exact name even when it contains spaces.
+		"--delimiter", "\t",
+	}
+	chosen, err := picker.NewFzf(cfg.Picker, pickerArgs...).Select(rows)
+	if err != nil {
+		if errors.Is(err, picker.ErrCancelled) {
+			return nil
+		}
+		return fmt.Errorf("picker: %w", err)
+	}
+
+	// Name is the first tab-delimited field — safe for names containing spaces.
+	name := strings.SplitN(chosen, "\t", 2)[0]
+	if name == "" {
+		// Defensive: a blank selection is never a real context.
+		return nil
+	}
+	return runSessionOpen(name)
 }
 
 // isHiddenName reports whether a directory name starts with a dot.

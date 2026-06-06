@@ -138,9 +138,23 @@ if [ -n "${TMUX:-}" ]; then
 fi
 
 # ── grove doctor ───────────────────────────────────────────────────────────────
+# doctor exits 0 when clean and 1 when it finds violations. In the fixture world
+# it is SUPPOSED to find seeded violations (a stale worktree, a detached HEAD),
+# so exit 1 here is success — only exit >= 2 is a real failure.
 
-run_section "grove doctor" \
-    grove doctor
+echo ""
+bold "── grove doctor"
+dim "$ grove doctor"
+doctor_out=$(grove doctor 2>&1)
+doctor_rc=$?
+echo "$doctor_out"
+if [ "$doctor_rc" -le 1 ]; then
+    green "  ✓ ok (exit $doctor_rc — 0 clean / 1 violations found)"
+    ((PASS++))
+else
+    red "  ✗ FAIL (exit $doctor_rc)"
+    ((FAIL++))
+fi
 
 # ── summary ────────────────────────────────────────────────────────────────────
 

@@ -1,19 +1,27 @@
 // Command gen generates a deterministic synthetic world for testing grove.
 //
-// It creates a fake code root and a fake vault tree that covers every context
-// shape grove needs to handle:
+// It creates a fake code root and vault tree that covers every context shape
+// and worktree state grove needs to handle:
 //
-//	coding-project-big   — two main repos, each with multiple worktrees
-//	coding-project-small — one main repo plus a single worktree
-//	non-coding-project   — no code directory (vault note only)
+//	coding-project-big   — cockpit: two repos, various worktree states
+//	coding-project-small — single-repo: main + WIP worktree
+//	non-coding-project   — vault note only, no code
+//	02-Areas/health      — area context (no project lifecycle)
+//	04-Archive           — archived project (for doctor archived-context check)
 //
-// The generated world doubles as the Docker clean-room fixture and the test
-// harness fixture — same data, two uses.
+// Worktree states covered:
+//
+//	clean / unmerged     — normal WIP (coding-project-small/repo)
+//	dirty                — uncommitted changes (repo-beta, feat/dirty)
+//	merged               — branch merged into main, worktree not removed (repo-alpha, feat/merged)
+//	stale                — branch deleted from main repo, worktree remains (repo-alpha, feat/stale)
+//	detached HEAD        — checked out to a commit, no branch (repo-beta, detached)
 //
 // Usage:
 //
-//	go run ./test/fixtures/gen                     # writes to /tmp/grove-fixtures
-//	go run ./test/fixtures/gen --out /some/path    # custom output directory
+//	go run ./test/fixtures/gen                  # writes to /tmp/grove-fixtures
+//	go run ./test/fixtures/gen -out /some/path  # custom output directory
+//	go run ./test/fixtures/gen -grove bin/grove # explicit grove binary path
 package main
 
 import (
@@ -26,108 +34,222 @@ import (
 )
 
 func main() {
-	out := flag.String("out", "/tmp/grove-fixtures", "output directory for the fixture world")
+	out := flag.String("out", "/tmp/grove-fixtures", "output directory")
+	groveBin := flag.String("grove", "bin/grove", "path to the grove binary")
 	flag.Parse()
 
-	if err := generate(*out); err != nil {
+	grove, err := filepath.Abs(*groveBin)
+	if err != nil {
+		log.Fatalf("resolving grove binary: %v", err)
+	}
+	if _, err := os.Stat(grove); err != nil {
+		log.Fatalf("grove binary not found at %s — run `make build` first", grove)
+	}
+
+	if err := generate(*out, grove); err != nil {
 		log.Fatalf("fixture generation failed: %v", err)
 	}
 
-	fmt.Printf("fixtures written to %s\n", *out)
+	fmt.Printf("fixtures written to %s\n\n", *out)
+	fmt.Printf("To use these fixtures:\n")
 	fmt.Printf("  export GROVE_CODE_ROOT=%s/code\n", *out)
 	fmt.Printf("  export GROVE_HOME_ROOT=%s/vault\n", *out)
+	fmt.Printf("\nTo inspect the world:\n")
+	fmt.Printf("  grove project list\n")
+	fmt.Printf("  grove session list\n")
+	fmt.Printf("  grove doctor\n")
 }
 
-func generate(root string) error {
-	// Start clean every time so the fixture world is always deterministic.
+// ── top-level ──────────────────────────────────────────────────────────────
+
+func generate(root, grove string) error {
 	if err := os.RemoveAll(root); err != nil {
 		return fmt.Errorf("removing old fixtures: %w", err)
 	}
 
-	codeRoot := filepath.Join(root, "code")
 	vaultRoot := filepath.Join(root, "vault")
+	codeRoot := filepath.Join(root, "code")
 
-	if err := buildVault(vaultRoot); err != nil {
-		return fmt.Errorf("building vault: %w", err)
+	// Vault tier scaffolding (grove project init needs 01-Projects to exist).
+	for _, tier := range []string{"01-Projects", "02-Areas", "04-Archive", "04-Archive/01-Projects"} {
+		if err := os.MkdirAll(filepath.Join(vaultRoot, tier), 0755); err != nil {
+			return fmt.Errorf("creating vault tier %s: %w", tier, err)
+		}
 	}
-	if err := buildCode(codeRoot); err != nil {
-		return fmt.Errorf("building code root: %w", err)
+
+	g := &gen{grove: grove, vaultRoot: vaultRoot, codeRoot: codeRoot}
+
+	if err := g.buildProjects(); err != nil {
+		return fmt.Errorf("building projects: %w", err)
+	}
+	if err := g.buildArea(); err != nil {
+		return fmt.Errorf("building area: %w", err)
+	}
+	if err := g.buildArchivedProject(); err != nil {
+		return fmt.Errorf("building archived project: %w", err)
 	}
 	return nil
 }
 
-// buildVault creates the fake knowledge tree.
-func buildVault(root string) error {
-	dirs := []string{
-		"01-Projects/coding-project-big",
-		"01-Projects/coding-project-small",
-		"01-Projects/non-coding-project",
-		"02-Areas/health",
-		"06-Meta/holmes-os",
+// gen holds shared state for the generation run.
+type gen struct {
+	grove     string
+	vaultRoot string
+	codeRoot  string
+}
+
+// ── projects ───────────────────────────────────────────────────────────────
+
+func (g *gen) buildProjects() error {
+	if err := g.buildCockpit(); err != nil {
+		return fmt.Errorf("cockpit: %w", err)
 	}
-	for _, d := range dirs {
-		if err := os.MkdirAll(filepath.Join(root, d), 0755); err != nil {
-			return err
-		}
+	if err := g.buildSmallProject(); err != nil {
+		return fmt.Errorf("small project: %w", err)
 	}
-	for _, proj := range []string{"coding-project-big", "coding-project-small", "non-coding-project"} {
-		note := filepath.Join(root, "01-Projects", proj, "context.md")
-		content := fmt.Sprintf("# %s\n\nfixture context note\n", proj)
-		if err := os.WriteFile(note, []byte(content), 0644); err != nil {
-			return err
-		}
+	if err := g.buildNonCodingProject(); err != nil {
+		return fmt.Errorf("non-coding project: %w", err)
 	}
 	return nil
 }
 
-// buildCode creates the fake code root with git repos and worktrees.
-func buildCode(root string) error {
-	// coding-project-big: two repos, each with multiple worktrees.
-	bigContainer := filepath.Join(root, "coding-project-big")
+// buildCockpit creates coding-project-big: two repos with all worktree states.
+func (g *gen) buildCockpit() error {
+	name := "coding-project-big"
 
-	alphaMain := filepath.Join(bigContainer, "repo-alpha")
+	// Vault: grove project init (no --code; cockpit has multiple repos).
+	if err := g.groveRun("project", "init", name); err != nil {
+		return fmt.Errorf("project init: %w", err)
+	}
+
+	container := filepath.Join(g.codeRoot, name)
+	if err := os.MkdirAll(container, 0755); err != nil {
+		return err
+	}
+
+	// ── repo-alpha: clean main + merged worktree + stale worktree ──────────
+	alphaMain := filepath.Join(container, "repo-alpha")
 	if err := initRepo(alphaMain, "main"); err != nil {
-		return fmt.Errorf("coding-project-big/repo-alpha: %w", err)
-	}
-	if err := addWorktree(alphaMain, filepath.Join(bigContainer, "repo-alpha-wt-one"), "feat/one"); err != nil {
-		return fmt.Errorf("coding-project-big/repo-alpha-wt-one: %w", err)
-	}
-	if err := addWorktree(alphaMain, filepath.Join(bigContainer, "repo-alpha-wt-two"), "feat/two"); err != nil {
-		return fmt.Errorf("coding-project-big/repo-alpha-wt-two: %w", err)
+		return fmt.Errorf("repo-alpha: %w", err)
 	}
 
-	betaMain := filepath.Join(bigContainer, "repo-beta")
+	// feat/merged: add commits, merge into main, leave worktree in place.
+	// Directory uses the slugified name (feat/ prefix stripped).
+	alphaWTMerged := filepath.Join(container, "repo-alpha-merged")
+	if err := addWorktree(alphaMain, alphaWTMerged, "feat/merged"); err != nil {
+		return err
+	}
+	if err := commitFile(alphaWTMerged, "merged.txt", "merged work"); err != nil {
+		return err
+	}
+	if err := gitRun(alphaMain, "git", "merge", "--no-ff", "feat/merged", "-m", "merge feat/merged"); err != nil {
+		return fmt.Errorf("merging feat/merged: %w", err)
+	}
+
+	// feat/stale: add worktree, then delete the branch from main repo using
+	// git plumbing so the worktree directory remains but the branch is gone.
+	alphaWTStale := filepath.Join(container, "repo-alpha-stale")
+	if err := addWorktree(alphaMain, alphaWTStale, "feat/stale"); err != nil {
+		return err
+	}
+	if err := gitRun(alphaMain, "git", "update-ref", "-d", "refs/heads/feat/stale"); err != nil {
+		return fmt.Errorf("deleting stale branch ref: %w", err)
+	}
+
+	// ── repo-beta: clean main + dirty worktree + detached worktree ─────────
+	betaMain := filepath.Join(container, "repo-beta")
 	if err := initRepo(betaMain, "main"); err != nil {
-		return fmt.Errorf("coding-project-big/repo-beta: %w", err)
-	}
-	if err := addWorktree(betaMain, filepath.Join(bigContainer, "repo-beta-ui"), "feat/ui"); err != nil {
-		return fmt.Errorf("coding-project-big/repo-beta-ui: %w", err)
+		return fmt.Errorf("repo-beta: %w", err)
 	}
 
-	// coding-project-small: one main repo plus a single worktree.
-	smallContainer := filepath.Join(root, "coding-project-small")
-	smallMain := filepath.Join(smallContainer, "repo")
-	if err := initRepo(smallMain, "main"); err != nil {
-		return fmt.Errorf("coding-project-small/repo: %w", err)
+	// feat/dirty: add worktree, write an unstaged file.
+	betaWTDirty := filepath.Join(container, "repo-beta-dirty")
+	if err := addWorktree(betaMain, betaWTDirty, "feat/dirty"); err != nil {
+		return err
 	}
-	if err := addWorktree(smallMain, filepath.Join(smallContainer, "repo-feat"), "feat/landing"); err != nil {
-		return fmt.Errorf("coding-project-small/repo-feat: %w", err)
+	if err := os.WriteFile(filepath.Join(betaWTDirty, "uncommitted.txt"), []byte("dirty work\n"), 0644); err != nil {
+		return fmt.Errorf("writing dirty file: %w", err)
 	}
 
-	// non-coding-project has no code directory — just the vault note above.
+	// detached: worktree with no branch (detached HEAD).
+	betaWTDetached := filepath.Join(container, "repo-beta-detached")
+	if err := gitRun(betaMain, "git", "worktree", "add", "--detach", betaWTDetached); err != nil {
+		return fmt.Errorf("adding detached worktree: %w", err)
+	}
+
 	return nil
 }
 
-// initRepo creates a new git repo at path with one empty commit on branch.
+// buildSmallProject creates coding-project-small: single repo + clean WIP worktree.
+func (g *gen) buildSmallProject() error {
+	name := "coding-project-small"
+
+	// Vault + code container (--no-git so we control git setup).
+	if err := g.groveRun("project", "init", name, "--code", "--no-git"); err != nil {
+		return fmt.Errorf("project init: %w", err)
+	}
+
+	// The code dir is the container. Init a repo inside it.
+	container := filepath.Join(g.codeRoot, name)
+	repoMain := filepath.Join(container, "repo")
+	if err := initRepo(repoMain, "main"); err != nil {
+		return fmt.Errorf("repo: %w", err)
+	}
+
+	// feat/landing: clean WIP — has commits but not merged, no dirty files.
+	repoWTLanding := filepath.Join(container, "repo-landing")
+	if err := addWorktree(repoMain, repoWTLanding, "feat/landing"); err != nil {
+		return err
+	}
+	if err := commitFile(repoWTLanding, "landing.txt", "landing page WIP"); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// buildNonCodingProject creates non-coding-project: vault note only.
+func (g *gen) buildNonCodingProject() error {
+	return g.groveRun("project", "init", "non-coding-project")
+}
+
+// ── area ───────────────────────────────────────────────────────────────────
+
+// buildArea creates a 02-Areas/health entry. grove project init only targets
+// 01-Projects, so this is created directly.
+func (g *gen) buildArea() error {
+	dir := filepath.Join(g.vaultRoot, "02-Areas", "health")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	content := "---\nname: health\ncreated: 2026-01-01\n---\n\n_Ongoing area._\n"
+	return os.WriteFile(filepath.Join(dir, "context.md"), []byte(content), 0644)
+}
+
+// ── archive ────────────────────────────────────────────────────────────────
+
+// buildArchivedProject creates an archived vault entry for doctor
+// archived-context tests.
+func (g *gen) buildArchivedProject() error {
+	dir := filepath.Join(g.vaultRoot, "04-Archive", "01-Projects", "old-project")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	content := "---\nname: old-project\ncreated: 2025-01-01\n---\n\n_Archived._\n"
+	return os.WriteFile(filepath.Join(dir, "context.md"), []byte(content), 0644)
+}
+
+// ── git helpers ────────────────────────────────────────────────────────────
+
+// initRepo creates a new bare git repo at path on branch with one empty commit.
 func initRepo(path, branch string) error {
 	if err := os.MkdirAll(path, 0755); err != nil {
 		return err
 	}
-	steps := [][]string{
+	for _, args := range [][]string{
 		{"git", "init", "-b", branch},
 		{"git", "commit", "--allow-empty", "-m", "init"},
-	}
-	for _, args := range steps {
+	} {
 		if err := gitRun(path, args...); err != nil {
 			return err
 		}
@@ -140,8 +262,19 @@ func addWorktree(mainRepo, dest, branch string) error {
 	return gitRun(mainRepo, "git", "worktree", "add", dest, "-b", branch)
 }
 
-// gitRun executes a git command in dir, injecting a fixture author identity so
-// the generator works in a clean Docker environment with no global git config.
+// commitFile writes content to filename in dir and commits it.
+func commitFile(dir, filename, content string) error {
+	if err := os.WriteFile(filepath.Join(dir, filename), []byte(content+"\n"), 0644); err != nil {
+		return err
+	}
+	if err := gitRun(dir, "git", "add", filename); err != nil {
+		return err
+	}
+	return gitRun(dir, "git", "commit", "-m", "add "+filename)
+}
+
+// gitRun executes a git command in dir with a fixture author identity so the
+// generator works in a clean environment with no global git config.
 func gitRun(dir string, args ...string) error {
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Dir = dir
@@ -152,7 +285,27 @@ func gitRun(dir string, args ...string) error {
 		"GIT_COMMITTER_EMAIL=fixture@grove.test",
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("%v: %s: %w", args, string(out), err)
+		return fmt.Errorf("git %v in %s: %s: %w", args[1:], dir, string(out), err)
+	}
+	return nil
+}
+
+// ── grove helper ───────────────────────────────────────────────────────────
+
+// groveRun calls the grove binary with GROVE_HOME_ROOT and GROVE_CODE_ROOT
+// set to the fixture vault and code roots.
+func (g *gen) groveRun(args ...string) error {
+	cmd := exec.Command(g.grove, args...)
+	cmd.Env = append(os.Environ(),
+		"GROVE_HOME_ROOT="+g.vaultRoot,
+		"GROVE_CODE_ROOT="+g.codeRoot,
+		"GIT_AUTHOR_NAME=Grove Fixture",
+		"GIT_AUTHOR_EMAIL=fixture@grove.test",
+		"GIT_COMMITTER_NAME=Grove Fixture",
+		"GIT_COMMITTER_EMAIL=fixture@grove.test",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("grove %v: %s: %w", args, string(out), err)
 	}
 	return nil
 }

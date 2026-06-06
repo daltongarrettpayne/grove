@@ -22,27 +22,39 @@ type Backend interface {
 
 // Fzf is the default Backend, backed by the fzf binary.
 type Fzf struct {
-	Binary string // name or absolute path of the fzf binary
+	Binary string   // name or absolute path of the fzf binary
+	Args   []string // additional fzf flags appended to every Select call
 }
 
 // NewFzf returns a Fzf backend. If binary is empty, "fzf" is used.
-func NewFzf(binary string) *Fzf {
+// Any extra args are appended to the fzf command line on every Select call,
+// making it easy to pass display flags like --height or --no-info without
+// changing any existing callers that pass no extra args.
+func NewFzf(binary string, args ...string) *Fzf {
 	if binary == "" {
 		binary = "fzf"
 	}
-	return &Fzf{Binary: binary}
+	return &Fzf{Binary: binary, Args: args}
 }
 
 func (f *Fzf) Select(rows []string) (string, error) {
-	cmd := exec.Command(f.Binary)
+	cmdArgs := append([]string{}, f.Args...)
+	cmd := exec.Command(f.Binary, cmdArgs...)
 	cmd.Stdin = strings.NewReader(strings.Join(rows, "\n"))
 
 	out, err := cmd.Output()
 	if err != nil {
 		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() == 130 {
-			// fzf exits 130 when the user presses Escape or Ctrl-C.
-			return "", ErrCancelled
+		if errors.As(err, &exitErr) {
+			switch exitErr.ExitCode() {
+			case 1:
+				// fzf exits 1 when there are no matches (empty list or query
+				// filtered everything). Treat as a cancel — no selection was made.
+				return "", ErrCancelled
+			case 130:
+				// fzf exits 130 when the user presses Escape or Ctrl-C.
+				return "", ErrCancelled
+			}
 		}
 		return "", fmt.Errorf("%s: %w", f.Binary, err)
 	}

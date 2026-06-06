@@ -3,9 +3,11 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -232,23 +234,77 @@ func runWindowPicker() error {
 
 	sessionName, err := tmux.CurrentSessionName()
 	if err != nil {
+		slog.Error("window pick: getting current session name", "err", err)
 		return fmt.Errorf("getting current session name: %w", err)
 	}
 
-	rows, _, err := buildWindowRows(sessionName)
+	// Fetch the real tmux window names — these are the authoritative targets
+	// for SelectWindow. Using disk-derived rows (buildWindowRows) would produce
+	// padded display strings like "kalashnikov-core    ·  main" that don't
+	// match the actual tmux window names and break selection.
+	names, err := tmux.ListWindows(sessionName)
 	if err != nil {
-		return err
+		slog.Error("window pick: listing windows", "session", sessionName, "err", err)
+		return fmt.Errorf("listing windows in session %q: %w", sessionName, err)
 	}
 
-	chosen, err := picker.NewFzf(cfg.Picker).Select(rows)
+	slog.Debug("window pick: got window names", "session", sessionName, "count", len(names))
+
+	// When inside tmux and not already in a popup, re-invoke self inside a
+	// tmux display-popup so the picker floats over the current window.
+	if os.Getenv("GROVE_POPUP_ACTIVE") != "1" {
+		maxNameLen := 0
+		for _, n := range names {
+			if len(n) > maxNameLen {
+				maxNameLen = len(n)
+			}
+		}
+		width := maxNameLen + 6
+		height := len(names) + 5
+		if height < 8 {
+			height = 8
+		}
+
+		self, err := os.Executable()
+		if err != nil {
+			return fmt.Errorf("resolving executable path: %w", err)
+		}
+		popupArgs := append(tmux.SocketArgs(), "display-popup",
+			"-w", strconv.Itoa(width),
+			"-h", strconv.Itoa(height),
+			"-e", "GROVE_POPUP_ACTIVE=1",
+			"-e", "GROVE_HOME_ROOT="+cfg.HomeRoot,
+			"-e", "GROVE_CODE_ROOT="+cfg.CodeRoot,
+		)
+		if cfg.TmuxSocket != "" {
+			popupArgs = append(popupArgs, "-e", "GROVE_TMUX_SOCKET="+cfg.TmuxSocket)
+		}
+		popupArgs = append(popupArgs, "-E", self+" window pick")
+		cmd := exec.Command("tmux", popupArgs...)
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		// Ignore the display-popup exit code. When the user selects a window,
+		// select-window closes the popup mid-execution, which kills the inner grove
+		// process and causes display-popup to exit non-zero. That is the successful
+		// case. Any genuine error was already shown inside the popup terminal.
+		_ = cmd.Run()
+		return nil
+	}
+
+	chosen, err := picker.NewFzf(cfg.Picker).Select(names)
 	if err != nil {
 		if errors.Is(err, picker.ErrCancelled) {
+			slog.Debug("window pick: cancelled", "session", sessionName)
 			return nil
 		}
+		slog.Error("window pick: picker error", "session", sessionName, "err", err)
 		return fmt.Errorf("picker: %w", err)
 	}
 
+	slog.Info("window pick: selecting window", "session", sessionName, "window", chosen)
 	if err := tmux.SelectWindow(sessionName, chosen); err != nil {
+		slog.Error("window pick: SelectWindow failed", "session", sessionName, "window", chosen, "err", err)
 		return fmt.Errorf("selecting window: %w", err)
 	}
 	return nil
@@ -259,10 +315,7 @@ func runWindowDeleteCurrent() error {
 		return fmt.Errorf("grove window delete must be run inside a tmux session")
 	}
 	// kill-window with no -t kills the current window.
-	cmd := exec.Command("tmux", "kill-window")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := tmux.KillCurrentWindow(); err != nil {
 		return fmt.Errorf("killing current window: %w", err)
 	}
 	fmt.Println("deleted current window")

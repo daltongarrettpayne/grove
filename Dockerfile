@@ -37,7 +37,10 @@ RUN chmod +x /usr/local/bin/dev-entrypoint
 
 # Generate the fixture world under $HOME so the layout mirrors the real system:
 # ~/code/ and ~/vault/ rather than a separate /fixtures/ directory.
-RUN go run ./test/fixtures/gen --out /root
+# Pass the binary we just built (/usr/local/bin/grove) explicitly — the
+# generator otherwise defaults to ./bin/grove, which inside this image would be
+# a host-built artifact of the wrong architecture if the build context leaked.
+RUN go run ./test/fixtures/gen --out /root --grove /usr/local/bin/grove
 
 # Tell grove where to find code and vault without any user config.
 ENV GROVE_CODE_ROOT=/root/code

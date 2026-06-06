@@ -1,14 +1,20 @@
 # grove Makefile
 # All targets are PHONY (no files named build/test/etc. in the repo).
-.PHONY: build test test-integration lint clean fixtures docker-build docker-run dev dev-fast
+.PHONY: build install test test-integration integration lint clean fixtures docker-build docker-run dev dev-fast
 
-BINARY  := grove
-CMD     := ./cmd/grove
-BIN_DIR := bin
+BINARY   := grove
+CMD      := ./cmd/grove
+BIN_DIR  := bin
+INSTALL  := $(HOME)/.local/bin
 
 ## build: compile the grove binary to bin/grove
 build:
 	go build -o $(BIN_DIR)/$(BINARY) $(CMD)
+
+## install: build and install grove to ~/.local/bin/grove
+install: build
+	install -m 755 $(BIN_DIR)/$(BINARY) $(INSTALL)/$(BINARY)
+	xattr -c $(INSTALL)/$(BINARY)
 
 ## test: run all unit tests with the race detector
 test:
@@ -26,9 +32,15 @@ lint:
 clean:
 	rm -rf $(BIN_DIR)/
 
-## fixtures: generate the deterministic test world at /tmp/grove-fixtures
-fixtures:
-	go run ./test/fixtures/gen
+## fixtures: build grove then generate the deterministic test world at /tmp/grove-fixtures
+fixtures: build
+	go run ./test/fixtures/gen -grove $(BIN_DIR)/$(BINARY)
+
+## integration: run the tmux/git/picker integration harness in the clean-room
+##   Drives session/window/worktree/project/status/doctor end to end against an
+##   isolated tmux server and asserts on the resulting state. No client needed.
+integration: docker-build
+	docker run --rm --entrypoint bash grove-dev scripts/integration-test.sh
 
 ## docker-build: build the dev/test clean-room image
 docker-build:
