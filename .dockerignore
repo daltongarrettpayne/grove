@@ -1,0 +1,13 @@
+# Keep host artifacts out of the clean-room build context.
+#
+# The Docker image is grove's portability proof: it must build the binary from
+# source using ONLY the declared deps. If host-built artifacts leak in, the
+# proof is void. In particular bin/grove is built for the host architecture
+# (e.g. macOS arm64) and would fail to exec inside the Linux image — the fixture
+# generator picks it up via its default -grove path and dies with
+# "exec format error". Exclude it, and VCS/editor noise while we're here.
+bin/
+.git/
+.github/
+*.log
+.DS_Store
